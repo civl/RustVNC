@@ -42,7 +42,7 @@ async fn session_receives_frame_and_sends_input() {
                     assert_eq!(data.len(), 32 * 16 * 4);
                     got_raw = true;
                 }
-                SessionEvent::Error(err) => panic!("session error: {err}"),
+                SessionEvent::Error { message, .. } => panic!("session error: {message}"),
                 _ => {}
             }
         }
@@ -165,4 +165,125 @@ async fn send_frame(stream: &mut TcpStream) -> anyhow::Result<()> {
 
 fn pixel_format() -> [u8; 16] {
     [32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_reconnects_after_remote_drop() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.expect("first accept");
+        handshake(&mut first).await.expect("first handshake");
+        // Force a protocol error so the client definitely reports the drop;
+        // a plain FIN is not always surfaced by the upstream decoder.
+        let _ = first.write_all(&[99]).await;
+        let _ = first.flush().await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(first);
+        let (mut second, _) = listener.accept().await.expect("second accept");
+        handshake(&mut second).await.expect("second handshake");
+        serve_one_frame(&mut second).await.expect("second frame");
+    });
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port: addr.port(),
+        bpp: 32,
+        auto_reconnect: true,
+        ..ClientConfig::default()
+    };
+
+    let mut session = Session::start(config, String::new()).expect("start");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut connected = 0;
+    let mut reconnecting = false;
+    let mut raw = false;
+    let mut seen = Vec::new();
+    while Instant::now() < deadline && !raw {
+        while let Some(event) = session.try_recv() {
+            seen.push(format!("{event:?}"));
+            match event {
+                SessionEvent::Connected { .. } => connected += 1,
+                SessionEvent::Reconnecting { .. } => reconnecting = true,
+                SessionEvent::RawImage { .. } => raw = true,
+                SessionEvent::Error { .. } => {}
+                _ => {}
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(connected >= 1, "no connected event: {seen:?}");
+    assert!(reconnecting, "no reconnecting event: {seen:?}");
+    assert!(raw, "no frame after reconnect: {seen:?}");
+    session.close();
+    server.await.expect("server");
+}
+
+async fn handshake(stream: &mut TcpStream) -> anyhow::Result<()> {
+    stream.write_all(b"RFB 003.008\n").await?;
+    let mut version = [0u8; 12];
+    stream.read_exact(&mut version).await?;
+    stream.write_all(&[1, 1]).await?;
+    let mut chosen = [0u8; 1];
+    stream.read_exact(&mut chosen).await?;
+    stream.write_all(&0u32.to_be_bytes()).await?;
+    let mut shared = [0u8; 1];
+    stream.read_exact(&mut shared).await?;
+    stream.write_all(&32u16.to_be_bytes()).await?;
+    stream.write_all(&16u16.to_be_bytes()).await?;
+    stream.write_all(&pixel_format()).await?;
+    stream.write_all(&(10u32).to_be_bytes()).await?;
+    stream.write_all(b"mock-vnc!!").await?;
+    Ok(())
+}
+
+async fn serve_one_frame(stream: &mut TcpStream) -> anyhow::Result<()> {
+    let mut sent = false;
+    loop {
+        let mut kind = [0u8; 1];
+        if stream.read_exact(&mut kind).await.is_err() {
+            break;
+        }
+        match kind[0] {
+            0 => {
+                let mut rest = [0u8; 19];
+                stream.read_exact(&mut rest).await?;
+            }
+            2 => {
+                let mut header = [0u8; 3];
+                stream.read_exact(&mut header).await?;
+                let count = u16::from_be_bytes([header[1], header[2]]) as usize;
+                let mut encodings = vec![0u8; count * 4];
+                stream.read_exact(&mut encodings).await?;
+            }
+            3 => {
+                let mut rest = [0u8; 9];
+                stream.read_exact(&mut rest).await?;
+                if !sent {
+                    send_frame(stream).await?;
+                    sent = true;
+                } else {
+                    stream.write_all(&[0, 0, 0, 0]).await?;
+                }
+            }
+            4 => {
+                let mut rest = [0u8; 7];
+                stream.read_exact(&mut rest).await?;
+            }
+            5 => {
+                let mut rest = [0u8; 5];
+                stream.read_exact(&mut rest).await?;
+            }
+            6 => {
+                let mut header = [0u8; 3];
+                stream.read_exact(&mut header).await?;
+                let mut length = [0u8; 4];
+                stream.read_exact(&mut length).await?;
+                let mut text = vec![0u8; u32::from_be_bytes(length) as usize];
+                stream.read_exact(&mut text).await?;
+            }
+            _ => break,
+        }
+    }
+    Ok(())
 }

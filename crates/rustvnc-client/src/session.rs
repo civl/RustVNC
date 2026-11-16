@@ -2,7 +2,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use vnc::{Rect, Screen, VncConnector, VncEvent, X11Event};
@@ -14,6 +14,59 @@ use crate::ssh::SshTunnel;
 pub enum SessionCommand {
     Input(X11Event),
     Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionErrorCode {
+    Auth,
+    Network,
+    Protocol,
+    Config,
+    Ssh,
+    Internal,
+}
+
+impl SessionErrorCode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auth => "AUTH",
+            Self::Network => "NETWORK",
+            Self::Protocol => "PROTOCOL",
+            Self::Config => "CONFIG",
+            Self::Ssh => "SSH",
+            Self::Internal => "INTERNAL",
+        }
+    }
+}
+
+impl std::fmt::Display for SessionErrorCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+#[derive(Debug)]
+struct SessionFailure {
+    code: SessionErrorCode,
+    message: String,
+    retryable: bool,
+    connected: bool,
+}
+
+impl SessionFailure {
+    fn new(code: SessionErrorCode, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            retryable,
+            connected: false,
+        }
+    }
+
+    fn after_connect(mut self) -> Self {
+        self.connected = true;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -42,7 +95,15 @@ pub enum SessionEvent {
         rects: u64,
         bytes: u64,
     },
-    Error(String),
+    Error {
+        code: SessionErrorCode,
+        message: String,
+        retryable: bool,
+    },
+    Reconnecting {
+        attempt: u32,
+        delay_ms: u64,
+    },
     Closed,
 }
 
@@ -76,8 +137,11 @@ impl Session {
                 {
                     Ok(runtime) => runtime,
                     Err(err) => {
-                        let _ = event_tx
-                            .send(SessionEvent::Error(format!("create tokio runtime: {err}")));
+                        let _ = event_tx.send(SessionEvent::Error {
+                            code: SessionErrorCode::Internal,
+                            message: format!("create tokio runtime: {err}"),
+                            retryable: false,
+                        });
                         return;
                     }
                 };
@@ -133,10 +197,57 @@ async fn run_session(
     mut commands: UnboundedReceiver<SessionCommand>,
     events: Sender<SessionEvent>,
 ) {
-    if let Err(err) = connect_and_loop(target, config, password, &mut commands, &events).await {
-        let _ = events.send(SessionEvent::Error(format!("{err:#}")));
+    let mut attempt = 0u32;
+    loop {
+        match connect_and_loop(
+            target.clone(),
+            config.clone(),
+            password.clone(),
+            &mut commands,
+            &events,
+        )
+        .await
+        {
+            Ok(()) => {
+                let _ = events.send(SessionEvent::Closed);
+                break;
+            }
+            Err(failure) => {
+                let _ = events.send(SessionEvent::Error {
+                    code: failure.code,
+                    message: failure.message.clone(),
+                    retryable: failure.retryable,
+                });
+                if failure.connected {
+                    attempt = 0;
+                }
+                if !config.auto_reconnect || !failure.retryable {
+                    let _ = events.send(SessionEvent::Closed);
+                    break;
+                }
+                attempt = attempt.saturating_add(1);
+                let delay = backoff(attempt);
+                let _ = events.send(SessionEvent::Reconnecting {
+                    attempt,
+                    delay_ms: delay.as_millis() as u64,
+                });
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    command = commands.recv() => {
+                        if matches!(command, Some(SessionCommand::Close) | None) {
+                            let _ = events.send(SessionEvent::Closed);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
-    let _ = events.send(SessionEvent::Closed);
+}
+
+fn backoff(attempt: u32) -> Duration {
+    let seconds = 1u64 << attempt.saturating_sub(1).min(4);
+    Duration::from_secs(seconds.min(15))
 }
 
 async fn connect_and_loop(
@@ -145,17 +256,29 @@ async fn connect_and_loop(
     password: String,
     commands: &mut UnboundedReceiver<SessionCommand>,
     events: &Sender<SessionEvent>,
-) -> Result<()> {
+) -> std::result::Result<(), SessionFailure> {
     if config.auth == AuthMode::Ard && config.user.trim().is_empty() {
-        bail!("ARD auth requires a macOS user name");
+        return Err(SessionFailure::new(
+            SessionErrorCode::Config,
+            "ARD auth requires a macOS user name",
+            false,
+        ));
     }
     if config.auth == AuthMode::Vnc && password.is_empty() {
-        bail!("VNC auth requires a password");
+        return Err(SessionFailure::new(
+            SessionErrorCode::Auth,
+            "VNC auth requires a password",
+            false,
+        ));
     }
 
-    let tcp = TcpStream::connect(&target)
-        .await
-        .with_context(|| format!("connect to {target}"))?;
+    let tcp = TcpStream::connect(&target).await.map_err(|err| {
+        SessionFailure::new(
+            SessionErrorCode::Network,
+            format!("connect to {target}: {err}"),
+            true,
+        )
+    })?;
     let mut connector = VncConnector::new(tcp)
         .allow_shared(config.shared)
         .set_pixel_format(config.pixel_format());
@@ -174,12 +297,24 @@ async fn connect_and_loop(
 
     let client = connector
         .build()
-        .context("build RFB connector")?
+        .map_err(|err| {
+            SessionFailure::new(
+                SessionErrorCode::Config,
+                format!("build RFB connector: {err}"),
+                false,
+            )
+        })?
         .try_start()
         .await
-        .context("RFB handshake/authentication")?
+        .map_err(SessionFailure::from_vnc)?
         .finish()
-        .context("finish RFB client")?;
+        .map_err(|err| {
+            SessionFailure::new(
+                SessionErrorCode::Config,
+                format!("finish RFB client: {err}"),
+                false,
+            )
+        })?;
 
     let mut width = 0usize;
     let mut height = 0usize;
@@ -232,14 +367,19 @@ async fn connect_and_loop(
                             let _ = events.send(SessionEvent::Clipboard(text));
                         }
                         VncEvent::Error(err) => {
-                            let _ = events.send(SessionEvent::Error(err));
+                            return Err(SessionFailure::from_message(err).after_connect());
                         }
                         _ => {}
                     },
                     Ok(None) => {}
                     Err(err) => {
-                        let _ = events.send(SessionEvent::Error(format!("VNC session: {err}")));
-                        break;
+                        let failure = SessionFailure::from_vnc(err).after_connect();
+                        let _ = events.send(SessionEvent::Error {
+                            code: failure.code,
+                            message: failure.message.clone(),
+                            retryable: failure.retryable,
+                        });
+                        return Err(failure);
                     }
                 }
             }
@@ -260,4 +400,45 @@ async fn connect_and_loop(
 
     let _ = client.close().await;
     Ok(())
+}
+
+impl SessionFailure {
+    fn from_message(message: String) -> Self {
+        let retryable = message.contains("server message")
+            || message.contains("Image data")
+            || message.contains("image data");
+        Self::new(
+            if retryable {
+                SessionErrorCode::Protocol
+            } else {
+                SessionErrorCode::Internal
+            },
+            message,
+            retryable,
+        )
+    }
+
+    fn from_vnc(err: vnc::VncError) -> Self {
+        use vnc::VncError;
+        match err {
+            VncError::NoPassword
+            | VncError::WrongPassword
+            | VncError::ArdAuthFailed(_)
+            | VncError::ArdNotOffered
+            | VncError::ArdVersionConflict(_)
+            | VncError::ArdProtocol(_)
+            | VncError::InvalidSecurityTyep(_) => {
+                Self::new(SessionErrorCode::Auth, err.to_string(), false)
+            }
+            VncError::IoError(_) => Self::new(SessionErrorCode::Network, err.to_string(), true),
+            VncError::ConnectError => Self::new(SessionErrorCode::Network, err.to_string(), true),
+            VncError::WrongServerMessage | VncError::InvalidImageData => {
+                Self::new(SessionErrorCode::Protocol, err.to_string(), true)
+            }
+            VncError::NoEncoding | VncError::WrongPixelFormat | VncError::ClientNotRunning => {
+                Self::new(SessionErrorCode::Protocol, err.to_string(), false)
+            }
+            _ => Self::new(SessionErrorCode::Internal, err.to_string(), false),
+        }
+    }
 }

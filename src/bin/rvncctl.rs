@@ -1,0 +1,80 @@
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand};
+use rustvnc_agent::client::{self, PairOptions, PingOptions};
+use rustvnc_agent::paths;
+
+#[derive(Debug, Parser)]
+#[command(name = "rvncctl", version, about = "RustVNC Agent control client (A1)")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Pair with an agent using a one-time pairing code.
+    Pair(PairArgs),
+    /// Connect with the paired client certificate and measure Ping/Pong RTT.
+    Ping(PingArgs),
+}
+
+#[derive(Debug, Args)]
+struct PairArgs {
+    #[arg(long, default_value = "127.0.0.1:8443")]
+    addr: String,
+    #[arg(long, help = "8-digit pairing code printed by the agent")]
+    code: String,
+    #[arg(long, default_value = "rvncctl")]
+    name: String,
+    #[arg(long, help = "Directory for ca.pem/client-cert.pem/client-key.pem")]
+    state_dir: Option<PathBuf>,
+    #[arg(long, help = "Fail if the server fingerprint does not match")]
+    expect_fingerprint: Option<String>,
+    #[arg(long, help = "TLS server name (defaults to the host part of --addr)")]
+    server_name: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct PingArgs {
+    #[arg(long, default_value = "127.0.0.1:8443")]
+    addr: String,
+    #[arg(long, default_value_t = 3)]
+    count: u32,
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    #[arg(long, help = "TLS server name (defaults to the host part of --addr)")]
+    server_name: Option<String>,
+}
+
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+    let result = match cli.command {
+        Command::Pair(args) => {
+            client::pair(PairOptions {
+                addr: args.addr,
+                code: args.code,
+                name: args.name,
+                state_dir: args.state_dir.unwrap_or_else(paths::client_dir),
+                expect_fingerprint: args.expect_fingerprint,
+                server_name: args.server_name,
+            })
+            .await
+        }
+        Command::Ping(args) => {
+            client::ping(PingOptions {
+                addr: args.addr,
+                count: args.count,
+                state_dir: args.state_dir.unwrap_or_else(paths::client_dir),
+                server_name: args.server_name,
+            })
+            .await
+        }
+    };
+
+    if let Err(err) = result {
+        eprintln!("error: {err:#}");
+        std::process::exit(1);
+    }
+}

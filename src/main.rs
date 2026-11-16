@@ -8,13 +8,14 @@ mod single_instance;
 mod smappservice;
 
 use std::fs;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
@@ -36,6 +37,10 @@ fn real_main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("--serve") => {
+            let options = parse_serve_options(&args[1..])?;
+            return run_serve(options);
+        }
         Some("--status") => {
             print_status();
             return Ok(());
@@ -239,12 +244,69 @@ fn print_help() {
          \n\
          Usage:\n\
            rustvnc-agent                 Run the menu bar agent\n\
+           rustvnc-agent --serve         Run the A1 QUIC control server (headless)\n\
            rustvnc-agent --status        Print SMAppService status\n\
            rustvnc-agent --register      Register the bundled LaunchAgent\n\
            rustvnc-agent --unregister    Unregister the bundled LaunchAgent\n\
            rustvnc-agent --version       Print version\n",
         env!("CARGO_PKG_VERSION")
     );
+}
+
+fn parse_serve_options(args: &[String]) -> anyhow::Result<rustvnc_agent::server::ServeOptions> {
+    let mut listen: SocketAddr = "127.0.0.1:8443"
+        .parse()
+        .expect("valid default listen address");
+    let mut state_dir = rustvnc_agent::paths::agent_dir();
+    let mut pair_code = None;
+    let mut sans = Vec::new();
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--listen" => {
+                index += 1;
+                listen = args
+                    .get(index)
+                    .context("--listen requires a value")?
+                    .parse()
+                    .context("invalid --listen address")?;
+            }
+            "--state-dir" => {
+                index += 1;
+                state_dir = PathBuf::from(args.get(index).context("--state-dir requires a value")?);
+            }
+            "--pair-code" => {
+                index += 1;
+                pair_code = Some(
+                    args.get(index)
+                        .context("--pair-code requires a value")?
+                        .clone(),
+                );
+            }
+            "--san" => {
+                index += 1;
+                sans.push(args.get(index).context("--san requires a value")?.clone());
+            }
+            other => bail!("unknown --serve option: {other}"),
+        }
+        index += 1;
+    }
+
+    Ok(rustvnc_agent::server::ServeOptions {
+        listen,
+        state_dir,
+        pair_code,
+        sans,
+    })
+}
+
+fn run_serve(options: rustvnc_agent::server::ServeOptions) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("create tokio runtime")?;
+    runtime.block_on(rustvnc_agent::server::run(options))
 }
 
 fn log_dir() -> PathBuf {

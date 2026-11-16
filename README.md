@@ -7,6 +7,7 @@ RustVNC 是一个用 Rust 构建、面向 Windows 用户的 macOS VNC 客户端�
 - [总体设计（需求 / 架构 / 开发路径）](design.md)
 - [macOS Agent 设计（B1/B2、音频、视频、权限、配对）](agent-design.md)
 - [A0 骨架说明（菜单栏 / SMAppService / 单实例）](README-A0.md)
+- [A1 控制面说明（QUIC/TLS / 配对 / Ping-Pong）](README-A1.md)
 
 ## 当前进度
 
@@ -16,7 +17,13 @@ RustVNC 是一个用 Rust 构建、面向 Windows 用户的 macOS VNC 客户端�
   - launchd 崩溃自动拉起、正常退出不复活
   - `flock` 单实例
   - 文件日志与基础诊断
-- **下一步（A1）**：QUIC/TLS 传输、配对、控制协议、客户端联调
+- **A1 已完成**：Agent 控制面
+  - QUIC + TLS 1.3（ALPN `rustvnc-agent/1`）
+  - 一次性配对码、自签 CA、客户端证书（mTLS）
+  - `Hello / ServerHello`、`Ping / Pong`
+  - 客户端证书白名单（`clients.txt`）
+  - `rvncctl` 命令行客户端（`pair` / `ping`）
+- **下一步（A2）**：把控制服务接入菜单栏进程，加入音频与剪贴板
 
 ## 目录
 
@@ -27,6 +34,7 @@ scripts/            # 构建、安装、重置服务
 design.md           # 总体设计
 agent-design.md     # Agent 详细设计
 README-A0.md        # A0 使用说明
+README-A1.md        # A1 控制面说明
 ```
 
 ## 构建 Agent

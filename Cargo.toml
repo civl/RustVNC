@@ -4,17 +4,29 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-description = "RustVNC macOS agent (A0 skeleton: menu bar + SMAppService + single instance)"
+description = "RustVNC macOS agent (A1: QUIC/TLS control, pairing, Ping/Pong)"
 
 [dependencies]
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 dirs = "7"
 fs2 = "0.4"
-signal-hook = "0.3"
+hex = "0.4"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-service-management = "0.3"
+postcard = { version = "1.1", features = ["use-std"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rand = "0.9"
+rcgen = { version = "0.14", features = ["x509-parser"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+signal-hook = "0.3"
+subtle = "2"
 tao = "0.37"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

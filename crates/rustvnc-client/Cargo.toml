@@ -7,6 +7,7 @@ license = "MIT"
 description = "RustVNC Windows client (M1 session core + egui UI)"
 
 [dependencies]
+ab_glyph = "0.2"
 anyhow = "1"
 arboard = "3"
 dirs = "7"

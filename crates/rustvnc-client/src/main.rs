@@ -62,7 +62,8 @@ struct App {
 }
 
 impl App {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        rustvnc_client::fonts::install_cjk_font(&cc.egui_ctx);
         let path = ProfileStore::default_path();
         let (profiles, error) = match ProfileStore::load(&path) {
             Ok(profiles) => (profiles, None),

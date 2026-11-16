@@ -32,6 +32,7 @@ M1 的**客户端核心、配置/凭据、输入、SSH 隧道和 UI 骨架**已�
 - **局部纹理更新**：Raw/CopyRect 只上传变化区域，避免每帧全屏 RGBA 上传。
 - **Windows 安装包**：Inno Setup 脚本、图标、PowerShell 构建脚本（`packaging/windows/`）。
 - **首次使用引导**：无配置时显示提示，引导填写 Mac 地址/端口/凭据与 SSH 建议。
+- **中文字体**：自动加载系统 CJK 字体（macOS Hiragino Sans GB / Windows 微软雅黑 / Linux Noto CJK）作为 egui 回退，解决中文方框。
 - **输入增强**：使用物理键位做快捷键映射；支持按键重复；特殊键携带 Shift/Ctrl/Alt/Cmd；工具栏“发送剪贴板”。
 - **测试**：新增自动重连 mock 测试（错误 → Reconnecting → 第二连接 → 新帧）。
 

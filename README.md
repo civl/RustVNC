@@ -51,7 +51,7 @@ RustVNC 是一个用 Rust 构建、面向 Windows 用户的 macOS VNC 客户端�
   - 键鼠/Unicode 输入、滚轮、修饰键、物理键位快捷键、按键重复
   - SSH 隧道（系统 OpenSSH、严格主机密钥、仅密钥认证）
   - 自动重连（指数退避）、统一错误码、每日滚动诊断日志
-  - 局部纹理更新、首次使用引导、Windows Inno Setup 安装脚本
+  - 局部纹理更新、首次使用引导、系统 CJK 字体回退、Windows Inno Setup 安装脚本
   - mock 会话/自动重连端到端测试；真实帧率、延迟、30 分钟稳定性待凭据与 Windows 真机
   - 见 [M1-STATUS.md](M1-STATUS.md)
 - **下一步**：M1b 验收（Windows 真机安装、真实 macOS 基准、Apple 1104 光标）；Agent 侧 A3：WASAPI 播放 + 抖动缓冲，或 B2 视频

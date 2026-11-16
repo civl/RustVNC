@@ -52,3 +52,63 @@ pub fn open_log_dir() -> Result<()> {
         .with_context(|| format!("open {}", directory.display()))?;
     Ok(())
 }
+
+/// Write a text diagnostic bundle containing app/OS info, a profile summary
+/// (never passwords) and the tail of the newest client log.
+pub fn write_bundle(summary: &str) -> Result<PathBuf> {
+    let directory = log_dir();
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("create {}", directory.display()))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let path = directory.join(format!("diagnostics-{stamp}.txt"));
+
+    let mut content = String::new();
+    content.push_str(&format!(
+        "RustVNC client {}\nOS: {} / {}\n\n",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    content.push_str(summary);
+    content.push_str("\n\n--- newest client log (tail) ---\n");
+    if let Some(log) = newest_log(&directory) {
+        content.push_str(&format!("{}\n", log.display()));
+        if let Ok(text) = std::fs::read_to_string(&log) {
+            let lines: Vec<&str> = text.lines().collect();
+            let start = lines.len().saturating_sub(400);
+            for line in &lines[start..] {
+                content.push_str(line);
+                content.push('\n');
+            }
+        }
+    } else {
+        content.push_str("(no client log found)\n");
+    }
+
+    std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
+fn newest_log(directory: &std::path::Path) -> Option<PathBuf> {
+    let mut newest = None;
+    let mut newest_modified = None;
+    for entry in std::fs::read_dir(directory).ok()?.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("client.log"))
+        {
+            continue;
+        }
+        let modified = entry.metadata().ok()?.modified().ok()?;
+        if newest_modified.is_none_or(|current| modified > current) {
+            newest_modified = Some(modified);
+            newest = Some(path);
+        }
+    }
+    newest
+}

@@ -33,6 +33,8 @@ M1 的**客户端核心、配置/凭据、输入、SSH 隧道和 UI 骨架**已�
 - **Windows 安装包**：Inno Setup 脚本、图标、PowerShell 构建脚本（`packaging/windows/`）。
 - **首次使用引导**：无配置时显示提示，引导填写 Mac 地址/端口/凭据与 SSH 建议。
 - **中文字体**：自动加载系统 CJK 字体（macOS Hiragino Sans GB / Windows 微软雅黑 / Linux Noto CJK）作为 egui 回退，解决中文方框。
+- **剪贴板双向**：本地剪贴板变化自动发送 `ClientCutText`；远端 `ServerCutText` 自动写入本地；可关闭。
+- **诊断包**：一键导出应用/系统/配置摘要（不含密码）+ 最近 400 行日志。
 - **输入增强**：使用物理键位做快捷键映射；支持按键重复；特殊键携带 Shift/Ctrl/Alt/Cmd；工具栏“发送剪贴板”。
 - **测试**：新增自动重连 mock 测试（错误 → Reconnecting → 第二连接 → 新帧）。
 
@@ -96,6 +98,8 @@ cargo test -p rustvnc-client
   - RFB 3.8 None 认证、32×16 Raw 帧、Resized、Pointer/Key；
   - 远端协议错误 → 自动重连 → 第二次连接收到新帧。
 - UI 冒烟：`target/debug/rustvnc-client` 可正常启动并保持运行。
+- 字体测试：系统 CJK 字体包含“中/文”字形。
+- 自动重连测试在 macOS/Windows CI 均通过。
 
 全 workspace：
 
@@ -120,9 +124,9 @@ cargo deny check
 | Windows 真机 | 安装包脚本已就绪，但未在 Windows 上实际安装/运行 | M1b 验收 |
 | 自动重连 | ✅ 已实现指数退避 | 已完成 |
 | 错误码 / 诊断 | ✅ 已实现错误码与文件日志 | 已完成 |
-| 剪贴板上行 | 工具栏可发送文本；Ctrl+V 由远端处理 | 部分完成 |
-| Windows 安装包 | Inno Setup 脚本已就绪，未生成/签名 | M1b 验收 |
-| 完整 Windows 键位 | 快捷键用物理键位；文本仍依赖 egui 逻辑键，无 IME 组合处理 | M1b |
+| 剪贴板上行 | ✅ 自动同步文本；非文本/富文本不支持 | 已完成（文本） |
+| Windows 安装包 | CI 已生成未签名安装包 artifact；未在真机安装 | M1b 验收 |
+| 完整 Windows 键位 | 快捷键用物理键位；文本仍依赖 egui 逻辑键 | M1b |
 | SSH 首次信任 | 需预先写入 known_hosts；无 UI 指纹确认 | M1b |
 | 多显示器 | 只处理 DesktopSize/单屏 | M2 |
 | 渲染性能 | 已做局部纹理更新；未在 1080p 真机基准 | M1b 验收 |
@@ -145,7 +149,7 @@ cargo run -p rustvnc-client
 
 ## 7. 下一步（M1b 验收 / M2）
 
-1. 在 Windows 真机生成/安装 Inno Setup 包并完成首次运行。
+1. 在 Windows 真机安装 CI 产出的 Inno Setup 包并完成首次运行。
 2. 真实 macOS 凭据下跑 30 分钟稳定性、fps、输入 P95、窗口重绘。
 3. 补 Apple 1104 光标与 1105/1109/1110。
 4. Windows 输入法/物理布局细化；剪贴板双向。

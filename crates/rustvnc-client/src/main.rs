@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use rustvnc_client::config::{
@@ -59,6 +59,10 @@ struct App {
     search: String,
     last_pointer: Option<(u16, u16, u8)>,
     last_texture_size: (usize, usize),
+    clipboard_sync: bool,
+    last_local_clipboard: Option<String>,
+    last_remote_clipboard: Option<String>,
+    last_clipboard_poll: Instant,
 }
 
 impl App {
@@ -102,6 +106,10 @@ impl App {
             search: String::new(),
             last_pointer: None,
             last_texture_size: (0, 0),
+            clipboard_sync: true,
+            last_local_clipboard: None,
+            last_remote_clipboard: None,
+            last_clipboard_poll: Instant::now(),
         }
     }
 
@@ -178,6 +186,10 @@ impl App {
                 self.pending_rects.clear();
                 self.last_pointer = None;
                 self.image_rect = None;
+                self.clipboard_sync = true;
+                self.last_local_clipboard = read_local_clipboard();
+                self.last_remote_clipboard = None;
+                self.last_clipboard_poll = Instant::now();
                 self.status = format!("Connecting to {}", session.local_addr());
                 self.stats.clear();
                 self.error = None;
@@ -244,7 +256,14 @@ impl App {
                     self.frame_dirty = true;
                 }
                 SessionEvent::Clipboard(text) => {
-                    ctx.copy_text(text);
+                    if self.clipboard_sync {
+                        self.last_remote_clipboard = Some(text.clone());
+                        self.last_local_clipboard = Some(text.clone());
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let _ = clipboard.set_text(text.clone());
+                        }
+                        ctx.copy_text(text);
+                    }
                 }
                 SessionEvent::Stats { fps, rects, bytes } => {
                     self.stats = format!("{fps:.1} fps · {rects} rects · {} KiB", bytes / 1024);
@@ -336,6 +355,7 @@ impl App {
                         }
                     });
                 ui.label(lang.t("画质（重连生效）", "Quality (reconnect)"));
+                ui.checkbox(&mut self.clipboard_sync, lang.t("剪贴板", "Clipboard"));
                 if ui.button(lang.t("发送剪贴板", "Send clipboard")).clicked()
                     && let Ok(mut clipboard) = arboard::Clipboard::new()
                     && let Ok(text) = clipboard.get_text()
@@ -676,6 +696,30 @@ impl App {
         }
     }
 
+    fn sync_clipboard(&mut self) {
+        if !self.clipboard_sync || self.session.is_none() {
+            return;
+        }
+        if self.last_clipboard_poll.elapsed() < Duration::from_millis(700) {
+            return;
+        }
+        self.last_clipboard_poll = Instant::now();
+        let Some(text) = read_local_clipboard() else {
+            return;
+        };
+        if text.is_empty() || self.last_local_clipboard.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        if self.last_remote_clipboard.as_deref() == Some(text.as_str()) {
+            self.last_local_clipboard = Some(text);
+            return;
+        }
+        if let Some(session) = &self.session {
+            session.send_input(X11Event::CopyText(text.clone()));
+        }
+        self.last_local_clipboard = Some(text);
+    }
+
     fn left_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let lang = self.lang;
         ui.heading("RustVNC");
@@ -738,6 +782,24 @@ impl App {
                 && let Err(err) = rustvnc_client::diag::open_log_dir()
             {
                 self.error = Some(format!("open logs: {err:#}"));
+            }
+            if ui.button(lang.t("导出诊断", "Diagnostics")).clicked() {
+                let mut summary = String::new();
+                summary.push_str(&format!("status: {}\nstats: {}\n", self.status, self.stats));
+                summary.push_str("profiles (host/name only):\n");
+                for profile in self.profiles.profiles() {
+                    summary.push_str(&format!(
+                        "- {}  {}:{}  auth={:?}\n",
+                        profile.name, profile.config.host, profile.config.port, profile.config.auth
+                    ));
+                }
+                match rustvnc_client::diag::write_bundle(&summary) {
+                    Ok(path) => {
+                        self.status = format!("Diagnostics: {}", path.display());
+                        let _ = rustvnc_client::diag::open_log_dir();
+                    }
+                    Err(err) => self.error = Some(format!("diagnostics: {err:#}")),
+                }
             }
             if ui.button(lang.t("从剪贴板导入", "Import")).clicked() {
                 match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
@@ -814,6 +876,7 @@ impl eframe::App for App {
         });
 
         self.handle_input(ctx);
+        self.sync_clipboard();
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 }
@@ -848,6 +911,12 @@ fn is_special_key(key: egui::Key) -> bool {
             | egui::Key::F11
             | egui::Key::F12
     )
+}
+
+fn read_local_clipboard() -> Option<String> {
+    arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut clipboard| clipboard.get_text().ok())
 }
 
 #[derive(Default)]

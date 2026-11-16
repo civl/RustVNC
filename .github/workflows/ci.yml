@@ -39,3 +39,7 @@ jobs:
         run: cargo build -p rfb-probe
       - name: Test probe
         run: cargo test -p rfb-probe
+      - name: Build client
+        run: cargo build -p rustvnc-client
+      - name: Test client
+        run: cargo test -p rustvnc-client

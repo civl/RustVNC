@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rfb-probe"]
+members = ["crates/rfb-probe", "crates/rustvnc-client"]
 resolver = "3"
 
 [package]

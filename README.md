@@ -11,6 +11,7 @@ RustVNC 是一个用 Rust 构建、面向 Windows 用户的 macOS VNC 客户端�
 - [A2 菜单栏服务与剪贴板说明](README-A2.md)
 - [A2b Core Audio Tap + Opus 音频说明](README-A2B.md)
 - [M0 兼容性报告](M0-COMPATIBILITY.md)
+- [M1 客户端状态报告](M1-STATUS.md)
 
 ## 当前进度
 
@@ -44,7 +45,14 @@ RustVNC 是一个用 Rust 构建、面向 Windows 用户的 macOS VNC 客户端�
   - 48 kHz 立体声、20 ms 帧、Opus 64 kbps
   - QUIC datagram 传输；只有客户端请求音频时才启动 tap
   - `rvncctl audio` 解码并统计 RMS
-- **下一步**：M0 真机成功出画（需 macOS 凭据）→ M1 客户端；Agent 侧 A3：Windows WASAPI 播放 + 抖动缓冲，或 B2 视频
+- **M1 条件通过**：Windows 客户端核心 + egui UI 骨架
+  - 配置 CRUD/搜索/导入导出、Keychain/Credential Manager
+  - 5 档画质 + 自定义、16/32bpp、ZRLE/Tight/Raw
+  - 键鼠/Unicode 输入、滚轮、修饰键
+  - SSH 隧道（系统 OpenSSH、严格主机密钥、仅密钥认证）
+  - mock 会话端到端测试；真实帧率/延迟/30 分钟稳定性待凭据与 Windows 真机
+  - 见 [M1-STATUS.md](M1-STATUS.md)
+- **下一步**：M1b（Apple 1104 光标、Windows 安装包、自动重连、真实基准）；Agent 侧 A3：WASAPI 播放 + 抖动缓冲，或 B2 视频
 
 ## 目录
 
@@ -60,6 +68,8 @@ README-A2.md        # A2 菜单栏与剪贴板说明
 README-A2B.md       # A2b Core Audio Tap + Opus 音频说明
 M0-COMPATIBILITY.md # M0 协议/兼容性报告
 crates/rfb-probe/   # M0 RFB 探针与 mock 测试
+crates/rustvnc-client/ # M1 Windows 客户端（Rust + egui）
+M1-STATUS.md        # M1 客户端状态报告
 ```
 
 ## 构建 Agent

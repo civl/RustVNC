@@ -1,5 +1,7 @@
 # RustVNC Agent — A2 菜单栏服务 + 剪贴板
 
+> A2b 已加入 Core Audio Tap + Opus 音频，见 [README-A2B.md](README-A2B.md)。
+
 A2 把 A1 的控制服务接进菜单栏进程，并加上双向文本剪贴板：
 
 - Agent 启动时自动启动 QUIC 控制服务（默认 `0.0.0.0:8443`）

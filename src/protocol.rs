@@ -3,6 +3,42 @@ use quinn::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
 
 pub const PROTO_VERSION: u16 = 1;
+pub const CAP_AUDIO: u32 = 1 << 0;
+
+pub const AUDIO_VERSION: u8 = 1;
+pub const AUDIO_HEADER_LEN: usize = 7;
+
+#[derive(Debug, Clone)]
+pub struct AudioPacket {
+    pub seq: u16,
+    pub pts_ms: u32,
+    pub payload: Vec<u8>,
+}
+
+pub fn encode_audio_packet(seq: u16, pts_ms: u32, payload: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(AUDIO_HEADER_LEN + payload.len());
+    packet.push(AUDIO_VERSION);
+    packet.extend_from_slice(&seq.to_le_bytes());
+    packet.extend_from_slice(&pts_ms.to_le_bytes());
+    packet.extend_from_slice(payload);
+    packet
+}
+
+pub fn parse_audio_packet(bytes: &[u8]) -> Result<AudioPacket> {
+    if bytes.len() <= AUDIO_HEADER_LEN {
+        bail!("audio packet too short: {}", bytes.len());
+    }
+    if bytes[0] != AUDIO_VERSION {
+        bail!("unsupported audio packet version {}", bytes[0]);
+    }
+    let seq = u16::from_le_bytes([bytes[1], bytes[2]]);
+    let pts_ms = u32::from_le_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]);
+    Ok(AudioPacket {
+        seq,
+        pts_ms,
+        payload: bytes[AUDIO_HEADER_LEN..].to_vec(),
+    })
+}
 pub const ALPN: &[u8] = b"rustvnc-agent/1";
 
 const MAX_FRAME_BYTES: usize = 1024 * 1024;

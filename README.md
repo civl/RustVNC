@@ -9,6 +9,7 @@ RustVNC 是一个用 Rust 构建、面向 Windows 用户的 macOS VNC 客户端�
 - [A0 骨架说明（菜单栏 / SMAppService / 单实例）](README-A0.md)
 - [A1 控制面说明（QUIC/TLS / 配对 / Ping-Pong）](README-A1.md)
 - [A2 菜单栏服务与剪贴板说明](README-A2.md)
+- [A2b Core Audio Tap + Opus 音频说明](README-A2B.md)
 
 ## 当前进度
 
@@ -33,7 +34,12 @@ RustVNC 是一个用 Rust 构建、面向 Windows 用户的 macOS VNC 客户端�
   - 显示服务器地址、配对码、客户端状态；一键复制配对码
   - 停止/启动服务器；重新启动生成新配对码
   - 双向 UTF-8 文本剪贴板（1 MiB，仅同步连接后的变化）
-- **下一步（A3）**：Core Audio Tap + Opus 音频
+- **A2b 已完成**：Core Audio Tap + Opus 音频
+  - Core Audio Process Tap（macOS 14.4+）
+  - 48 kHz 立体声、20 ms 帧、Opus 64 kbps
+  - QUIC datagram 传输；只有客户端请求音频时才启动 tap
+  - `rvncctl audio` 解码并统计 RMS
+- **下一步（A3）**：Windows 客户端 WASAPI 播放 + 抖动缓冲，或 B2 视频
 
 ## 目录
 
@@ -46,6 +52,7 @@ agent-design.md     # Agent 详细设计
 README-A0.md        # A0 使用说明
 README-A1.md        # A1 控制面说明
 README-A2.md        # A2 菜单栏与剪贴板说明
+README-A2B.md       # A2b Core Audio Tap + Opus 音频说明
 ```
 
 ## 构建 Agent

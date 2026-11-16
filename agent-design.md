@@ -4,7 +4,7 @@
 >
 > 关联文档：[design.md](design.md)（总体方案，§6.5 RustDesk 参考边界，M4/M5 里程碑）
 >
-> 实现状态（2026-11-16）：A0 骨架、A1 控制面（QUIC + TLS 1.3 + CSR 配对 + Keychain + 按 IP 限流 + Ping/Pong + 集成测试）、A2 菜单栏服务 + 文本剪贴板已落地；
+> 实现状态（2026-11-16）：A0 骨架、A1 控制面（QUIC + TLS 1.3 + CSR 配对 + Keychain + 按 IP 限流 + Ping/Pong + 集成测试）、A2 菜单栏服务 + 文本剪贴板、A2b Core Audio Tap + Opus 音频已落地；
 > 实现细节见 [README-A1.md](README-A1.md)。
 
 ---
@@ -1371,3 +1371,4 @@ EnableLowLatencyRateControl = true (若支持)
 | v0.2 | 2026-11-16 | A1 控制面落地（QUIC/TLS 1.3、配对、mTLS、Ping/Pong）；A1 简化项见 README-A1.md |
 | v0.3 | 2026-11-16 | A1 安全收口：CSR、Keychain、按 IP 限流、自动化集成测试 |
 | v0.4 | 2026-11-16 | A2：控制服务接入菜单栏、配对码/状态展示、双向文本剪贴板 |
+| v0.5 | 2026-11-16 | A2b：Core Audio Process Tap + Opus + QUIC datagram 音频链路 |

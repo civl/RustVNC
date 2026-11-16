@@ -24,6 +24,7 @@ impl TestServer {
             pair_code: Some(code.to_string()),
             sans: vec![],
             keychain: false,
+            audio_enabled: false,
             events: None,
         };
         let handle = tokio::spawn(server::run_with_shutdown(

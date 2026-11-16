@@ -15,6 +15,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
+use crate::audio::AudioCapture;
 use crate::clipboard;
 use crate::protocol::{self, ControlMsg};
 use crate::tls;
@@ -33,6 +34,7 @@ pub struct ServeOptions {
     pub pair_code: Option<String>,
     pub sans: Vec<String>,
     pub keychain: bool,
+    pub audio_enabled: bool,
     pub events: Option<Sender<ServerEvent>>,
 }
 
@@ -144,6 +146,7 @@ pub async fn run_with_shutdown(
                                 pairing,
                                 pair_limiter,
                                 events,
+                                options.audio_enabled,
                             )
                             .await
                             {
@@ -190,6 +193,7 @@ async fn handle_connection(
     pairing: Arc<Pairing>,
     pair_limiter: Arc<RateLimiter>,
     events: Option<Sender<ServerEvent>>,
+    audio_enabled: bool,
 ) -> Result<()> {
     let (mut send, mut recv) = connection
         .accept_bi()
@@ -252,7 +256,7 @@ async fn handle_connection(
         ControlMsg::Hello {
             proto,
             client,
-            capabilities: _,
+            capabilities: client_capabilities,
         } => {
             if proto != protocol::PROTO_VERSION {
                 let _ = protocol::write_msg(
@@ -302,12 +306,41 @@ async fn handle_connection(
                     fingerprint: fingerprint.clone(),
                 },
             );
+            let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+            let mut audio_capture = None;
+            let mut audio_forward = None;
+            let mut capabilities = 0u32;
+
+            if audio_enabled && client_capabilities & protocol::CAP_AUDIO != 0 {
+                match AudioCapture::start(audio_tx) {
+                    Ok(capture) => {
+                        let connection = connection.clone();
+                        audio_forward = Some(tokio::spawn(async move {
+                            while let Some(packet) = audio_rx.recv().await {
+                                if let Err(err) =
+                                    connection.send_datagram(bytes::Bytes::from(packet))
+                                {
+                                    warn!("audio datagram send failed: {err}");
+                                    break;
+                                }
+                            }
+                        }));
+                        audio_capture = Some(capture);
+                        capabilities |= protocol::CAP_AUDIO;
+                        info!("audio capture started for session");
+                    }
+                    Err(err) => {
+                        warn!("audio unavailable for session: {err:#}");
+                    }
+                }
+            }
+
             protocol::write_msg(
                 &mut send,
                 &ControlMsg::ServerHello {
                     proto: protocol::PROTO_VERSION,
                     agent: format!("RustVNC Agent {}", env!("CARGO_PKG_VERSION")),
-                    capabilities: 0,
+                    capabilities,
                 },
             )
             .await?;
@@ -412,6 +445,12 @@ async fn handle_connection(
                 }
             }
             reader.abort();
+            if let Some(mut capture) = audio_capture.take() {
+                capture.stop();
+            }
+            if let Some(forward) = audio_forward.take() {
+                forward.abort();
+            }
             let _ = send.finish();
             emit(&events, ServerEvent::Disconnected);
         }

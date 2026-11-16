@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use rustvnc_agent::client::{self, PairOptions, PingOptions};
+use rustvnc_agent::client::{self, AudioOptions, PairOptions, PingOptions};
 use rustvnc_agent::paths;
 
 #[derive(Debug, Parser)]
@@ -17,6 +17,8 @@ enum Command {
     Pair(PairArgs),
     /// Connect with the paired client certificate and measure Ping/Pong RTT.
     Ping(PingArgs),
+    /// Connect and count/decode Opus audio datagrams.
+    Audio(AudioArgs),
 }
 
 #[derive(Debug, Args)]
@@ -34,6 +36,23 @@ struct PairArgs {
     #[arg(long, help = "TLS server name (defaults to the host part of --addr)")]
     server_name: Option<String>,
     #[arg(long, help = "Store the client key in a 0600 file instead of Keychain")]
+    no_keychain: bool,
+}
+
+#[derive(Debug, Args)]
+struct AudioArgs {
+    #[arg(long, default_value = "127.0.0.1:8443")]
+    addr: String,
+    #[arg(long, default_value_t = 5)]
+    seconds: u64,
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    #[arg(long, help = "TLS server name (defaults to the host part of --addr)")]
+    server_name: Option<String>,
+    #[arg(
+        long,
+        help = "Read the client key from a 0600 file instead of Keychain"
+    )]
     no_keychain: bool,
 }
 
@@ -69,6 +88,16 @@ async fn main() {
                 name: args.name,
                 state_dir: args.state_dir.unwrap_or_else(paths::client_dir),
                 expect_fingerprint: args.expect_fingerprint,
+                server_name: args.server_name,
+                keychain: !args.no_keychain,
+            })
+            .await
+        }
+        Command::Audio(args) => {
+            client::audio(AudioOptions {
+                addr: args.addr,
+                seconds: args.seconds,
+                state_dir: args.state_dir.unwrap_or_else(paths::client_dir),
                 server_name: args.server_name,
                 keychain: !args.no_keychain,
             })

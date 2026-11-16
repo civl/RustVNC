@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use opus::{Channels, Decoder};
 use rcgen::{CertificateParams, DnType, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose};
 use tracing::{info, warn};
 
@@ -18,6 +19,15 @@ pub struct PairOptions {
     pub name: String,
     pub state_dir: PathBuf,
     pub expect_fingerprint: Option<String>,
+    pub server_name: Option<String>,
+    pub keychain: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioOptions {
+    pub addr: String,
+    pub seconds: u64,
+    pub state_dir: PathBuf,
     pub server_name: Option<String>,
     pub keychain: bool,
 }
@@ -218,6 +228,127 @@ pub async fn ping(options: PingOptions) -> Result<()> {
     endpoint.wait_idle().await;
     info!("ping session complete");
     Ok(())
+}
+
+pub async fn audio(options: AudioOptions) -> Result<()> {
+    tls::install_provider();
+
+    let state = load_state(&options.state_dir, options.keychain)?;
+    let remote = resolve(&options.addr).await?;
+    let server_name = options
+        .server_name
+        .clone()
+        .unwrap_or_else(|| host_from_addr(&options.addr));
+
+    let mut endpoint =
+        quinn::Endpoint::client("0.0.0.0:0".parse()?).context("create QUIC client endpoint")?;
+    endpoint.set_default_client_config(tls::authenticated_client_config(
+        &state.ca_cert_pem,
+        &state.client_cert_pem,
+        &state.client_key_pem,
+    )?);
+
+    let connection = endpoint
+        .connect(remote, &server_name)
+        .with_context(|| format!("connect to {remote} ({server_name})"))?
+        .await
+        .context("QUIC/TLS handshake (mTLS)")?;
+
+    let (mut send, mut recv) = connection.open_bi().await.context("open control stream")?;
+    protocol::write_msg(
+        &mut send,
+        &ControlMsg::Hello {
+            proto: protocol::PROTO_VERSION,
+            client: options.name_or_default(),
+            capabilities: protocol::CAP_AUDIO,
+        },
+    )
+    .await?;
+
+    match protocol::read_msg(&mut recv).await? {
+        ControlMsg::ServerHello {
+            proto,
+            capabilities,
+            ..
+        } => {
+            if proto != protocol::PROTO_VERSION {
+                bail!(
+                    "server protocol version {proto} != {}",
+                    protocol::PROTO_VERSION
+                );
+            }
+            if capabilities & protocol::CAP_AUDIO == 0 {
+                bail!("agent did not start audio capture (permission or tap error)");
+            }
+        }
+        ControlMsg::Error { code, message } => {
+            bail!("server rejected session (code {code}): {message}")
+        }
+        other => bail!("unexpected server hello: {other:?}"),
+    }
+
+    let mut decoder = Decoder::new(48_000, Channels::Stereo).context("create Opus decoder")?;
+    let deadline = Instant::now() + Duration::from_secs(options.seconds);
+    let mut pcm = vec![0f32; 5760];
+    let mut packets = 0u64;
+    let mut bytes = 0u64;
+    let mut squared_sum = 0f64;
+    let mut samples = 0u64;
+    let mut last_seq: Option<u16> = None;
+
+    while Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), connection.read_datagram()).await {
+            Ok(Ok(datagram)) => {
+                bytes += datagram.len() as u64;
+                let packet = match protocol::parse_audio_packet(&datagram) {
+                    Ok(packet) => packet,
+                    Err(err) => {
+                        warn!("bad audio packet: {err:#}");
+                        continue;
+                    }
+                };
+                if let Some(previous) = last_seq {
+                    if packet.seq != previous.wrapping_add(1) {
+                        warn!("audio packet gap: {} -> {}", previous, packet.seq);
+                    }
+                }
+                last_seq = Some(packet.seq);
+
+                let decoded = decoder
+                    .decode_float(&packet.payload, &mut pcm, false)
+                    .context("Opus decode")?;
+                packets += 1;
+                samples += decoded as u64;
+                for sample in &pcm[..decoded * 2] {
+                    squared_sum += (*sample as f64) * (*sample as f64);
+                }
+                if packets % 50 == 0 {
+                    println!("audio: packets={packets} seq={} bytes={bytes}", packet.seq);
+                }
+            }
+            Ok(Err(err)) => bail!("read audio datagram: {err}"),
+            Err(_) => {}
+        }
+    }
+
+    let rms = if samples == 0 {
+        0.0
+    } else {
+        (squared_sum / (samples * 2) as f64).sqrt()
+    };
+    println!("audio summary: packets={packets} samples={samples} bytes={bytes} rms={rms:.5}");
+
+    let _ = protocol::write_msg(&mut send, &ControlMsg::Goodbye).await;
+    let _ = send.finish();
+    connection.close(0u32.into(), b"audio complete");
+    endpoint.wait_idle().await;
+    Ok(())
+}
+
+impl AudioOptions {
+    fn name_or_default(&self) -> String {
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "rvncctl".to_string())
+    }
 }
 
 impl PingOptions {

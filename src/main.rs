@@ -296,6 +296,7 @@ fn start_server(ui: &mut ServerUi) {
         pair_code: std::env::var("RUSTVNC_PAIR_CODE").ok(),
         sans: Vec::new(),
         keychain: std::env::var("RUSTVNC_NO_KEYCHAIN").is_err(),
+        audio_enabled: std::env::var("RUSTVNC_NO_AUDIO").is_err(),
         events: Some(events_tx.clone()),
     };
 
@@ -495,7 +496,7 @@ fn print_help() {
          \n\
          Usage:\n\
            rustvnc-agent                 Run the menu bar agent\n\
-           rustvnc-agent --serve [--no-keychain]  Run the A1 QUIC control server (headless)\n\
+           rustvnc-agent --serve [--no-keychain] [--no-audio]  Run the control server (headless)\n\
            rustvnc-agent --status        Print SMAppService status\n\
            rustvnc-agent --register      Register the bundled LaunchAgent\n\
            rustvnc-agent --unregister    Unregister the bundled LaunchAgent\n\
@@ -512,6 +513,7 @@ fn parse_serve_options(args: &[String]) -> anyhow::Result<rustvnc_agent::server:
     let mut pair_code = None;
     let mut sans = Vec::new();
     let mut keychain = true;
+    let mut audio_enabled = true;
 
     let mut index = 0;
     while index < args.len() {
@@ -543,6 +545,9 @@ fn parse_serve_options(args: &[String]) -> anyhow::Result<rustvnc_agent::server:
             "--no-keychain" => {
                 keychain = false;
             }
+            "--no-audio" => {
+                audio_enabled = false;
+            }
             other => bail!("unknown --serve option: {other}"),
         }
         index += 1;
@@ -554,6 +559,7 @@ fn parse_serve_options(args: &[String]) -> anyhow::Result<rustvnc_agent::server:
         pair_code,
         sans,
         keychain,
+        audio_enabled,
         events: None,
     })
 }

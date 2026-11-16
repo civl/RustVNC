@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rustvnc.agent</string>
+
+    <!-- Path relative to the root of the containing app bundle.
+         Using BundleProgram lets the user move the .app after installation. -->
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/rustvnc-agent</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart only after a crash (non-zero exit). A clean "Quit" (exit 0)
+         must not be respawned immediately. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ExitTimeOut</key>
+    <integer>5</integer>
+</dict>
+</plist>

@@ -1,0 +1,25 @@
+[package]
+name = "rustvnc-agent"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "RustVNC macOS agent (A0 skeleton: menu bar + SMAppService + single instance)"
+
+[dependencies]
+anyhow = "1"
+dirs = "7"
+fs2 = "0.4"
+signal-hook = "0.3"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-service-management = "0.3"
+tao = "0.37"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tray-icon = { version = "0.26", default-features = false }
+
+[profile.release]
+strip = true
+lto = "thin"

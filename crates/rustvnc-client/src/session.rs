@@ -338,8 +338,14 @@ async fn connect_and_loop(
             command = commands.recv() => {
                 match command {
                     Some(SessionCommand::Input(event)) => {
-                        if client.input(event).await.is_err() {
-                            break;
+                        if let Err(err) = client.input(event).await {
+                            let failure = SessionFailure::from_vnc(err).after_connect();
+                            let _ = events.send(SessionEvent::Error {
+                                code: failure.code,
+                                message: failure.message.clone(),
+                                retryable: failure.retryable,
+                            });
+                            return Err(failure);
                         }
                     }
                     Some(SessionCommand::Close) | None => break,
@@ -384,8 +390,14 @@ async fn connect_and_loop(
                 }
             }
             _ = ticker.tick() => {
-                if client.input(X11Event::Refresh).await.is_err() {
-                    break;
+                if let Err(err) = client.input(X11Event::Refresh).await {
+                    let failure = SessionFailure::from_vnc(err).after_connect();
+                    let _ = events.send(SessionEvent::Error {
+                        code: failure.code,
+                        message: failure.message.clone(),
+                        retryable: failure.retryable,
+                    });
+                    return Err(failure);
                 }
                 if last_stats.elapsed() >= Duration::from_secs(1) {
                     let elapsed = last_stats.elapsed().as_secs_f64().max(0.001);

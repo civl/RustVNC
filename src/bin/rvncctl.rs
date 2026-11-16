@@ -52,6 +52,10 @@ struct PingArgs {
         help = "Read the client key from a 0600 file instead of Keychain"
     )]
     no_keychain: bool,
+    #[arg(long, help = "Send this text to the agent clipboard after connecting")]
+    clipboard_text: Option<String>,
+    #[arg(long, default_value_t = 0, help = "Delay between pings (milliseconds)")]
+    interval_ms: u64,
 }
 
 #[tokio::main]
@@ -77,6 +81,8 @@ async fn main() {
                 state_dir: args.state_dir.unwrap_or_else(paths::client_dir),
                 server_name: args.server_name,
                 keychain: !args.no_keychain,
+                clipboard_text: args.clipboard_text,
+                interval_ms: args.interval_ms,
             })
             .await
         }

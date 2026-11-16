@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-description = "RustVNC macOS agent (A1: QUIC/TLS control, pairing, Ping/Pong)"
+description = "RustVNC macOS agent (A2: menu bar control server, pairing, clipboard)"
 
 [dependencies]
 anyhow = "1"
@@ -27,7 +27,7 @@ sha2 = "0.10"
 signal-hook = "0.3"
 subtle = "2"
 tao = "0.37"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "process"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

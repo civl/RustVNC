@@ -5,6 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
+use crate::clipboard;
 use crate::protocol::{self, ControlMsg};
 use crate::tls;
 
@@ -31,6 +33,17 @@ pub struct ServeOptions {
     pub pair_code: Option<String>,
     pub sans: Vec<String>,
     pub keychain: bool,
+    pub events: Option<Sender<ServerEvent>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ServerEvent {
+    Started(ServeInfo),
+    Paired { client: String, fingerprint: String },
+    Connected { client: String, fingerprint: String },
+    Disconnected,
+    Stopped,
+    Error(String),
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +100,7 @@ pub async fn run_with_shutdown(
     println!("STATE DIR: {}", options.state_dir.display());
     info!(%local, "agent control server listening");
 
+    emit(&options.events, ServerEvent::Started(info.clone()));
     if let Some(ready) = ready {
         let _ = ready.send(info);
     }
@@ -117,6 +131,7 @@ pub async fn run_with_shutdown(
                 let allowlist = Arc::clone(&allowlist);
                 let pairing = Arc::clone(&pairing);
                 let pair_limiter = Arc::clone(&pair_limiter);
+                let events = options.events.clone();
 
                 tasks.spawn(async move {
                     match incoming.await {
@@ -128,6 +143,7 @@ pub async fn run_with_shutdown(
                                 allowlist,
                                 pairing,
                                 pair_limiter,
+                                events,
                             )
                             .await
                             {
@@ -145,8 +161,15 @@ pub async fn run_with_shutdown(
     endpoint.close(0u32.into(), b"shutdown");
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
+    emit(&options.events, ServerEvent::Stopped);
     info!("control server stopped");
     Ok(())
+}
+
+fn emit(events: &Option<Sender<ServerEvent>>, event: ServerEvent) {
+    if let Some(events) = events {
+        let _ = events.send(event);
+    }
 }
 
 async fn shutdown_requested(shutdown: &mut watch::Receiver<bool>) {
@@ -166,6 +189,7 @@ async fn handle_connection(
     allowlist: Arc<Allowlist>,
     pairing: Arc<Pairing>,
     pair_limiter: Arc<RateLimiter>,
+    events: Option<Sender<ServerEvent>>,
 ) -> Result<()> {
     let (mut send, mut recv) = connection
         .accept_bi()
@@ -198,6 +222,13 @@ async fn handle_connection(
                 Ok(()) => {
                     let issued = tls::issue_client_cert(&material, &client_name, &csr_pem)?;
                     allowlist.add(&issued.fingerprint, &client_name)?;
+                    emit(
+                        &events,
+                        ServerEvent::Paired {
+                            client: client_name.clone(),
+                            fingerprint: issued.fingerprint.clone(),
+                        },
+                    );
                     protocol::write_msg(
                         &mut send,
                         &ControlMsg::PairResponse {
@@ -264,6 +295,13 @@ async fn handle_connection(
             }
 
             info!(%client, %fingerprint, "client authenticated");
+            emit(
+                &events,
+                ServerEvent::Connected {
+                    client: client.clone(),
+                    fingerprint: fingerprint.clone(),
+                },
+            );
             protocol::write_msg(
                 &mut send,
                 &ControlMsg::ServerHello {
@@ -274,30 +312,108 @@ async fn handle_connection(
             )
             .await?;
 
+            let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<ControlMsg>(16);
+            let mut reader_recv = recv;
+            let reader = tokio::spawn(async move {
+                loop {
+                    match protocol::read_msg(&mut reader_recv).await {
+                        Ok(message) => {
+                            if msg_tx.send(message).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            warn!("control stream ended: {err:#}");
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut clipboard_enabled = true;
+            // Baseline the current pasteboard so connecting does not immediately
+            // upload whatever the user copied before the session.
+            let mut last_sent = match clipboard::get_text().await {
+                Ok(Some(text)) => text,
+                Ok(None) => String::new(),
+                Err(err) => {
+                    warn!("clipboard read failed at session start: {err:#}");
+                    clipboard_enabled = false;
+                    String::new()
+                }
+            };
+            let mut last_received = String::new();
+
             loop {
-                match protocol::read_msg(&mut recv).await {
-                    Ok(ControlMsg::Ping { nonce }) => {
-                        protocol::write_msg(&mut send, &ControlMsg::Pong { nonce }).await?;
+                tokio::select! {
+                    message = msg_rx.recv() => {
+                        match message {
+                            Some(ControlMsg::Ping { nonce }) => {
+                                if protocol::write_msg(&mut send, &ControlMsg::Pong { nonce })
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Some(ControlMsg::ClipboardText { text }) => {
+                                if let Some(text) = clipboard::normalize(&text) {
+                                    last_received = text.clone();
+                                    if let Err(err) = clipboard::set_text(&text).await {
+                                        warn!("clipboard write failed: {err:#}");
+                                        clipboard_enabled = false;
+                                    }
+                                }
+                            }
+                            Some(ControlMsg::Goodbye) | None => break,
+                            Some(other) => {
+                                let _ = protocol::write_msg(
+                                    &mut send,
+                                    &protocol::error(
+                                        protocol::error_code::PROTOCOL,
+                                        format!("unexpected message in control stream: {other:?}"),
+                                    ),
+                                )
+                                .await;
+                                break;
+                            }
+                        }
                     }
-                    Ok(ControlMsg::Goodbye) => break,
-                    Ok(other) => {
-                        let _ = protocol::write_msg(
-                            &mut send,
-                            &protocol::error(
-                                protocol::error_code::PROTOCOL,
-                                format!("unexpected message in control stream: {other:?}"),
-                            ),
-                        )
-                        .await;
-                        break;
-                    }
-                    Err(err) => {
-                        warn!("control stream ended: {err:#}");
-                        break;
+                    _ = ticker.tick() => {
+                        if !clipboard_enabled {
+                            continue;
+                        }
+                        match clipboard::get_text().await {
+                            Ok(Some(text)) => {
+                                if let Some(text) = clipboard::normalize(&text) {
+                                    if text != last_sent && text != last_received {
+                                        if protocol::write_msg(
+                                            &mut send,
+                                            &ControlMsg::ClipboardText { text: text.clone() },
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            break;
+                                        }
+                                        last_sent = text;
+                                    }
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                warn!("clipboard read failed: {err:#}");
+                                clipboard_enabled = false;
+                            }
+                        }
                     }
                 }
             }
+            reader.abort();
             let _ = send.finish();
+            emit(&events, ServerEvent::Disconnected);
         }
         other => {
             let _ = protocol::write_msg(

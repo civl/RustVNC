@@ -1,5 +1,7 @@
 # RustVNC Agent — A1 控制面
 
+> A2 已把控制服务接入菜单栏并加入剪贴板，见 [README-A2.md](README-A2.md)。
+
 A1 在 A0 骨架上加入 Agent 与客户端之间的**加密控制通道**，并完成第一轮安全收口：
 
 - QUIC + TLS 1.3（ALPN `rustvnc-agent/1`）

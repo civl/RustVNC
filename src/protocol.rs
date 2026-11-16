@@ -36,6 +36,9 @@ pub enum ControlMsg {
     Pong {
         nonce: u64,
     },
+    ClipboardText {
+        text: String,
+    },
     Goodbye,
     Error {
         code: u16,

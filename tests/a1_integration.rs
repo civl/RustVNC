@@ -24,6 +24,7 @@ impl TestServer {
             pair_code: Some(code.to_string()),
             sans: vec![],
             keychain: false,
+            events: None,
         };
         let handle = tokio::spawn(server::run_with_shutdown(
             options,
@@ -70,6 +71,8 @@ fn ping_options(addr: &str, state_dir: &Path) -> PingOptions {
         state_dir: state_dir.to_path_buf(),
         server_name: None,
         keychain: false,
+        clipboard_text: None,
+        interval_ms: 0,
     }
 }
 

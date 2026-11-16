@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use rcgen::{CertificateParams, DnType, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose};
@@ -29,6 +29,8 @@ pub struct PingOptions {
     pub state_dir: PathBuf,
     pub server_name: Option<String>,
     pub keychain: bool,
+    pub clipboard_text: Option<String>,
+    pub interval_ms: u64,
 }
 
 struct ClientState {
@@ -177,20 +179,36 @@ pub async fn ping(options: PingOptions) -> Result<()> {
         other => bail!("unexpected server hello: {other:?}"),
     }
 
+    if let Some(text) = options.clipboard_text.clone() {
+        protocol::write_msg(&mut send, &ControlMsg::ClipboardText { text }).await?;
+    }
+
     for index in 0..options.count {
         let nonce = rand::random::<u64>();
         let start = Instant::now();
         protocol::write_msg(&mut send, &ControlMsg::Ping { nonce }).await?;
-        match protocol::read_msg(&mut recv).await? {
-            ControlMsg::Pong { nonce: echoed } if echoed == nonce => {
-                let rtt = start.elapsed();
-                println!("pong {index}: rtt={:.3} ms", rtt.as_secs_f64() * 1000.0);
+        loop {
+            match protocol::read_msg(&mut recv).await? {
+                ControlMsg::Pong { nonce: echoed } if echoed == nonce => {
+                    let rtt = start.elapsed();
+                    println!("pong {index}: rtt={:.3} ms", rtt.as_secs_f64() * 1000.0);
+                    if options.interval_ms > 0 && index + 1 < options.count {
+                        tokio::time::sleep(Duration::from_millis(options.interval_ms)).await;
+                    }
+                    break;
+                }
+                ControlMsg::Pong { nonce: echoed } => {
+                    warn!("pong nonce mismatch: sent {nonce}, got {echoed}");
+                    break;
+                }
+                ControlMsg::ClipboardText { text } => {
+                    println!("clipboard: {} bytes", text.len());
+                }
+                ControlMsg::Error { code, message } => {
+                    bail!("server error (code {code}): {message}")
+                }
+                other => bail!("unexpected ping response: {other:?}"),
             }
-            ControlMsg::Pong { nonce: echoed } => {
-                warn!("pong nonce mismatch: sent {nonce}, got {echoed}");
-            }
-            ControlMsg::Error { code, message } => bail!("server error (code {code}): {message}"),
-            other => bail!("unexpected ping response: {other:?}"),
         }
     }
 

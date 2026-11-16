@@ -33,6 +33,8 @@ struct PairArgs {
     expect_fingerprint: Option<String>,
     #[arg(long, help = "TLS server name (defaults to the host part of --addr)")]
     server_name: Option<String>,
+    #[arg(long, help = "Store the client key in a 0600 file instead of Keychain")]
+    no_keychain: bool,
 }
 
 #[derive(Debug, Args)]
@@ -45,6 +47,11 @@ struct PingArgs {
     state_dir: Option<PathBuf>,
     #[arg(long, help = "TLS server name (defaults to the host part of --addr)")]
     server_name: Option<String>,
+    #[arg(
+        long,
+        help = "Read the client key from a 0600 file instead of Keychain"
+    )]
+    no_keychain: bool,
 }
 
 #[tokio::main]
@@ -59,6 +66,7 @@ async fn main() {
                 state_dir: args.state_dir.unwrap_or_else(paths::client_dir),
                 expect_fingerprint: args.expect_fingerprint,
                 server_name: args.server_name,
+                keychain: !args.no_keychain,
             })
             .await
         }
@@ -68,6 +76,7 @@ async fn main() {
                 count: args.count,
                 state_dir: args.state_dir.unwrap_or_else(paths::client_dir),
                 server_name: args.server_name,
+                keychain: !args.no_keychain,
             })
             .await
         }

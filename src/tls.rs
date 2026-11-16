@@ -4,10 +4,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose,
+    BasicConstraints, CertificateParams, CertificateSigningRequestParams, DnType,
+    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::paths;
 use crate::protocol;
+use crate::secrets::SecretStore;
 
 #[derive(Clone, Debug)]
 pub struct Material {
@@ -30,7 +31,6 @@ pub struct Material {
 #[derive(Clone, Debug)]
 pub struct IssuedClient {
     pub cert_pem: String,
-    pub key_pem: String,
     pub fingerprint: String,
 }
 
@@ -38,77 +38,101 @@ pub fn install_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-pub fn ensure_material(dir: &Path, extra_sans: &[String]) -> Result<Material> {
+pub fn ensure_material(dir: &Path, extra_sans: &[String], keychain: bool) -> Result<Material> {
     paths::ensure_private_dir(dir).context("create agent state dir")?;
 
+    let store = SecretStore::agent(dir, keychain);
     let ca_cert_path = dir.join("ca-cert.pem");
-    let ca_key_path = dir.join("ca-key.pem");
     let server_cert_path = dir.join("server-cert.pem");
-    let server_key_path = dir.join("server-key.pem");
 
-    let all_exist = ca_cert_path.exists()
-        && ca_key_path.exists()
-        && server_cert_path.exists()
-        && server_key_path.exists();
+    let ca_cert = read_optional_string(&ca_cert_path)?;
+    let ca_key = store.get("ca-key", "ca-key.pem")?;
+    let server_cert = read_optional_string(&server_cert_path)?;
+    let server_key = store.get("server-key", "server-key.pem")?;
 
-    if !all_exist {
-        generate_material(
-            &ca_cert_path,
-            &ca_key_path,
-            &server_cert_path,
-            &server_key_path,
-            extra_sans,
-        )?;
+    let (ca_cert_pem, ca_key_pem, server_cert_pem, server_key_pem) =
+        match (ca_cert, ca_key, server_cert, server_key) {
+            (None, None, None, None) => generate_all(dir, &store, extra_sans)?,
+            (Some(ca_cert), Some(ca_key), Some(server_cert), Some(server_key)) => (
+                ca_cert,
+                String::from_utf8(ca_key).context("CA key is not UTF-8 PEM")?,
+                server_cert,
+                String::from_utf8(server_key).context("server key is not UTF-8 PEM")?,
+            ),
+            (Some(ca_cert), Some(ca_key), _, _) => {
+                let ca_key_pem = String::from_utf8(ca_key).context("CA key is not UTF-8 PEM")?;
+                let (server_cert_pem, server_key_pem) =
+                    regenerate_server(dir, &store, &ca_cert, &ca_key_pem, extra_sans)?;
+                (ca_cert, ca_key_pem, server_cert_pem, server_key_pem)
+            }
+            (Some(_), None, _, _) => {
+                bail!("CA certificate exists but CA private key is missing")
+            }
+            (None, Some(_), _, _) => {
+                bail!("CA private key exists but CA certificate is missing")
+            }
+            _ => bail!("inconsistent certificate state in {}", dir.display()),
+        };
+
+    // Migrate keys from legacy 0600 files into Keychain on first use.
+    if keychain {
+        if dir.join("ca-key.pem").exists() {
+            let _ = store.set("ca-key", "ca-key.pem", ca_key_pem.as_bytes());
+        }
+        if dir.join("server-key.pem").exists() {
+            let _ = store.set("server-key", "server-key.pem", server_key_pem.as_bytes());
+        }
     }
 
-    // Keep permissions tight even for files created by an older build.
-    for path in [&ca_key_path, &server_key_path] {
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-    }
-
-    let material = Material {
-        ca_cert_pem: fs::read_to_string(&ca_cert_path).context("read CA certificate")?,
-        ca_key_pem: fs::read_to_string(&ca_key_path).context("read CA key")?,
-        server_cert_pem: fs::read_to_string(&server_cert_path)
-            .context("read server certificate")?,
-        server_key_pem: fs::read_to_string(&server_key_path).context("read server key")?,
-        server_fingerprint: String::new(),
-    };
-
-    let fingerprint = fingerprint_pem(&material.server_cert_pem)?;
+    let fingerprint = fingerprint_pem(&server_cert_pem)?;
     Ok(Material {
+        ca_cert_pem,
+        ca_key_pem,
+        server_cert_pem,
+        server_key_pem,
         server_fingerprint: fingerprint,
-        ..material
     })
 }
 
-fn generate_material(
-    ca_cert_path: &Path,
-    ca_key_path: &Path,
-    server_cert_path: &Path,
-    server_key_path: &Path,
+fn generate_all(
+    dir: &Path,
+    store: &SecretStore,
     extra_sans: &[String],
-) -> Result<()> {
+) -> Result<(String, String, String, String)> {
     let ca_key = KeyPair::generate().context("generate CA key")?;
-    let mut ca_params = CertificateParams::new(Vec::<String>::new()).context("CA params")?;
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca_params
-        .distinguished_name
-        .push(DnType::CommonName, "RustVNC Agent CA");
-    ca_params.key_usages = vec![
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::CrlSign,
-        KeyUsagePurpose::DigitalSignature,
-    ];
+    let ca_params = ca_params()?;
     let ca_cert = ca_params.self_signed(&ca_key).context("self-sign CA")?;
 
     let ca_cert_pem = ca_cert.pem();
     let ca_key_pem = ca_key.serialize_pem();
-    paths::write_private(ca_cert_path, ca_cert_pem.as_bytes())?;
-    paths::write_private(ca_key_path, ca_key_pem.as_bytes())?;
+    store.set("ca-key", "ca-key.pem", ca_key_pem.as_bytes())?;
+    write_cert(&dir.join("ca-cert.pem"), &ca_cert_pem)?;
 
-    let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, KeyPair::from_pem(&ca_key_pem)?)
-        .context("load generated CA issuer")?;
+    let (server_cert_pem, server_key_pem) =
+        sign_server(dir, store, &ca_cert_pem, &ca_key_pem, extra_sans)?;
+
+    Ok((ca_cert_pem, ca_key_pem, server_cert_pem, server_key_pem))
+}
+
+fn regenerate_server(
+    dir: &Path,
+    store: &SecretStore,
+    ca_cert_pem: &str,
+    ca_key_pem: &str,
+    extra_sans: &[String],
+) -> Result<(String, String)> {
+    sign_server(dir, store, ca_cert_pem, ca_key_pem, extra_sans)
+}
+
+fn sign_server(
+    dir: &Path,
+    store: &SecretStore,
+    ca_cert_pem: &str,
+    ca_key_pem: &str,
+    extra_sans: &[String],
+) -> Result<(String, String)> {
+    let issuer = Issuer::from_ca_cert_pem(ca_cert_pem, KeyPair::from_pem(ca_key_pem)?)
+        .context("load CA issuer")?;
 
     let server_key = KeyPair::generate().context("generate server key")?;
     let server_params = server_params(extra_sans)?;
@@ -116,9 +140,25 @@ fn generate_material(
         .signed_by(&server_key, &issuer)
         .context("sign server certificate")?;
 
-    paths::write_private(server_cert_path, server_cert.pem().as_bytes())?;
-    paths::write_private(server_key_path, server_key.serialize_pem().as_bytes())?;
-    Ok(())
+    let server_cert_pem = server_cert.pem();
+    let server_key_pem = server_key.serialize_pem();
+    store.set("server-key", "server-key.pem", server_key_pem.as_bytes())?;
+    write_cert(&dir.join("server-cert.pem"), &server_cert_pem)?;
+    Ok((server_cert_pem, server_key_pem))
+}
+
+fn ca_params() -> Result<CertificateParams> {
+    let mut params = CertificateParams::new(Vec::<String>::new()).context("CA params")?;
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "RustVNC Agent CA");
+    params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+        KeyUsagePurpose::DigitalSignature,
+    ];
+    Ok(params)
 }
 
 fn server_params(extra_sans: &[String]) -> Result<CertificateParams> {
@@ -145,34 +185,38 @@ fn server_params(extra_sans: &[String]) -> Result<CertificateParams> {
     Ok(params)
 }
 
-pub fn issue_client_cert(material: &Material, client_name: &str) -> Result<IssuedClient> {
+pub fn issue_client_cert(
+    material: &Material,
+    client_name: &str,
+    csr_pem: &str,
+) -> Result<IssuedClient> {
+    let csr = CertificateSigningRequestParams::from_pem(csr_pem).context("parse CSR")?;
+    if matches!(csr.params.is_ca, IsCa::Ca(_)) {
+        bail!("CSR must not request a CA certificate");
+    }
+
+    let mut params = csr.params.clone();
+    params.distinguished_name = Default::default();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, sanitize_client_name(client_name));
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    params.use_authority_key_identifier_extension = true;
+
     let issuer = Issuer::from_ca_cert_pem(
         &material.ca_cert_pem,
         KeyPair::from_pem(&material.ca_key_pem).context("load CA key")?,
     )
     .context("load CA issuer")?;
 
-    let key = KeyPair::generate().context("generate client key")?;
-    let mut params =
-        CertificateParams::new(Vec::<String>::new()).context("client certificate params")?;
-    params
-        .distinguished_name
-        .push(DnType::CommonName, sanitize_client_name(client_name));
-    params.key_usages.push(KeyUsagePurpose::DigitalSignature);
-    params
-        .extended_key_usages
-        .push(ExtendedKeyUsagePurpose::ClientAuth);
-    params.use_authority_key_identifier_extension = true;
-
     let cert = params
-        .signed_by(&key, &issuer)
+        .signed_by(&csr.public_key, &issuer)
         .context("sign client certificate")?;
-    let fingerprint = fingerprint_der(cert.der());
 
     Ok(IssuedClient {
         cert_pem: cert.pem(),
-        key_pem: key.serialize_pem(),
-        fingerprint,
+        fingerprint: fingerprint_der(cert.der()),
     })
 }
 
@@ -286,6 +330,20 @@ fn key_from_pem(pem: &str) -> Result<PrivateKeyDer<'static>> {
     rustls_pemfile::private_key(&mut reader)
         .context("parse PEM private key")?
         .ok_or_else(|| anyhow!("PEM contains no private key"))
+}
+
+fn read_optional_string(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+fn write_cert(path: &Path, pem: &str) -> Result<()> {
+    fs::write(path, pem).with_context(|| format!("write {}", path.display()))?;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    Ok(())
 }
 
 /// Pairing only: the server is not authenticated yet. The client compares the

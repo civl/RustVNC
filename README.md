@@ -22,6 +22,10 @@ RustVNC 是一个用 Rust 构建、面向 Windows 用户的 macOS VNC 客户端�
   - 一次性配对码、自签 CA、客户端证书（mTLS）
   - `Hello / ServerHello`、`Ping / Pong`
   - 客户端证书白名单（`clients.txt`）
+  - CSR 配对（客户端私钥不出本机）
+  - CA/服务器/客户端私钥存 Keychain（可 `--no-keychain` 回退文件）
+  - 按 IP 限流（配对与连接）
+  - 全链路集成测试（配对 / Ping / 拒绝 / 限流）
   - `rvncctl` 命令行客户端（`pair` / `ping`）
 - **下一步（A2）**：把控制服务接入菜单栏进程，加入音频与剪贴板
 

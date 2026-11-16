@@ -4,7 +4,7 @@
 >
 > 关联文档：[design.md](design.md)（总体方案，§6.5 RustDesk 参考边界，M4/M5 里程碑）
 >
-> 实现状态（2026-11-16）：A0 骨架、A1 控制面（QUIC + TLS 1.3 + 配对 + Ping/Pong）已落地；
+> 实现状态（2026-11-16）：A0 骨架、A1 控制面（QUIC + TLS 1.3 + CSR 配对 + Keychain + 按 IP 限流 + Ping/Pong + 集成测试）已落地；
 > 实现细节见 [README-A1.md](README-A1.md)。
 
 ---
@@ -1369,3 +1369,4 @@ EnableLowLatencyRateControl = true (若支持)
 |---|---|---|
 | v0.1 | 2026-11-16 | 初稿：B1/B2 双模、Tailscale 绑定、SCK+VT、Core Audio Tap、配对/权限/稳定性/测试与 7 周计划 |
 | v0.2 | 2026-11-16 | A1 控制面落地（QUIC/TLS 1.3、配对、mTLS、Ping/Pong）；A1 简化项见 README-A1.md |
+| v0.3 | 2026-11-16 | A1 安全收口：CSR、Keychain、按 IP 限流、自动化集成测试 |

@@ -23,10 +23,10 @@ pub enum ControlMsg {
     PairRequest {
         code: String,
         client_name: String,
+        csr_pem: String,
     },
     PairResponse {
         client_cert_pem: String,
-        client_key_pem: String,
         ca_cert_pem: String,
         server_fingerprint: String,
     },

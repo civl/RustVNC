@@ -1,12 +1,14 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
+use rcgen::{CertificateParams, DnType, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose};
 use tracing::{info, warn};
 
 use crate::paths;
 use crate::protocol::{self, ControlMsg};
+use crate::secrets::SecretStore;
 use crate::tls;
 
 #[derive(Debug, Clone)]
@@ -17,6 +19,7 @@ pub struct PairOptions {
     pub state_dir: PathBuf,
     pub expect_fingerprint: Option<String>,
     pub server_name: Option<String>,
+    pub keychain: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +28,7 @@ pub struct PingOptions {
     pub count: u32,
     pub state_dir: PathBuf,
     pub server_name: Option<String>,
+    pub keychain: bool,
 }
 
 struct ClientState {
@@ -35,6 +39,20 @@ struct ClientState {
 
 pub async fn pair(options: PairOptions) -> Result<()> {
     tls::install_provider();
+
+    // The client generates its private key locally and only sends a CSR.
+    let key = KeyPair::generate().context("generate client key")?;
+    let mut params =
+        CertificateParams::new(Vec::<String>::new()).context("client certificate params")?;
+    params
+        .distinguished_name
+        .push(DnType::CommonName, options.name.clone());
+    params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+    params
+        .extended_key_usages
+        .push(ExtendedKeyUsagePurpose::ClientAuth);
+    let csr = params.serialize_request(&key).context("create CSR")?;
+    let csr_pem = csr.pem().context("encode CSR")?;
 
     let remote = resolve(&options.addr).await?;
     let server_name = options
@@ -57,6 +75,7 @@ pub async fn pair(options: PairOptions) -> Result<()> {
         &ControlMsg::PairRequest {
             code: options.code.clone(),
             client_name: options.name.clone(),
+            csr_pem,
         },
     )
     .await?;
@@ -65,7 +84,6 @@ pub async fn pair(options: PairOptions) -> Result<()> {
     match response {
         ControlMsg::PairResponse {
             client_cert_pem,
-            client_key_pem,
             ca_cert_pem,
             server_fingerprint,
         } => {
@@ -79,9 +97,10 @@ pub async fn pair(options: PairOptions) -> Result<()> {
 
             save_state(
                 &options.state_dir,
+                options.keychain,
                 &ca_cert_pem,
                 &client_cert_pem,
-                &client_key_pem,
+                &key.serialize_pem(),
             )?;
 
             println!("PAIRED");
@@ -103,7 +122,7 @@ pub async fn pair(options: PairOptions) -> Result<()> {
 pub async fn ping(options: PingOptions) -> Result<()> {
     tls::install_provider();
 
-    let state = load_state(&options.state_dir)?;
+    let state = load_state(&options.state_dir, options.keychain)?;
     let remote = resolve(&options.addr).await?;
     let server_name = options
         .server_name
@@ -190,25 +209,41 @@ impl PingOptions {
 }
 
 fn save_state(
-    dir: &std::path::Path,
+    dir: &Path,
+    keychain: bool,
     ca_cert_pem: &str,
     client_cert_pem: &str,
     client_key_pem: &str,
 ) -> Result<()> {
     paths::ensure_private_dir(dir)?;
+    let store = SecretStore::client(dir, keychain);
+    store.set(
+        &SecretStore::client_account(dir),
+        "client-key.pem",
+        client_key_pem.as_bytes(),
+    )?;
     paths::write_private(&dir.join("ca.pem"), ca_cert_pem.as_bytes())?;
     paths::write_private(&dir.join("client-cert.pem"), client_cert_pem.as_bytes())?;
-    paths::write_private(&dir.join("client-key.pem"), client_key_pem.as_bytes())?;
     Ok(())
 }
 
-fn load_state(dir: &std::path::Path) -> Result<ClientState> {
+fn load_state(dir: &Path, keychain: bool) -> Result<ClientState> {
     let ca_cert_pem = std::fs::read_to_string(dir.join("ca.pem"))
         .with_context(|| format!("read {}/ca.pem (run `rvncctl pair` first)", dir.display()))?;
     let client_cert_pem = std::fs::read_to_string(dir.join("client-cert.pem"))
         .with_context(|| format!("read {}/client-cert.pem", dir.display()))?;
-    let client_key_pem = std::fs::read_to_string(dir.join("client-key.pem"))
-        .with_context(|| format!("read {}/client-key.pem", dir.display()))?;
+
+    let store = SecretStore::client(dir, keychain);
+    let client_key = store
+        .get(&SecretStore::client_account(dir), "client-key.pem")?
+        .ok_or_else(|| {
+            anyhow!(
+                "client key missing for {}; run `rvncctl pair` again",
+                dir.display()
+            )
+        })?;
+    let client_key_pem = String::from_utf8(client_key).context("client key is not UTF-8 PEM")?;
+
     Ok(ClientState {
         ca_cert_pem,
         client_cert_pem,

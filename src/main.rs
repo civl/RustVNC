@@ -244,7 +244,7 @@ fn print_help() {
          \n\
          Usage:\n\
            rustvnc-agent                 Run the menu bar agent\n\
-           rustvnc-agent --serve         Run the A1 QUIC control server (headless)\n\
+           rustvnc-agent --serve [--no-keychain]  Run the A1 QUIC control server (headless)\n\
            rustvnc-agent --status        Print SMAppService status\n\
            rustvnc-agent --register      Register the bundled LaunchAgent\n\
            rustvnc-agent --unregister    Unregister the bundled LaunchAgent\n\
@@ -260,6 +260,7 @@ fn parse_serve_options(args: &[String]) -> anyhow::Result<rustvnc_agent::server:
     let mut state_dir = rustvnc_agent::paths::agent_dir();
     let mut pair_code = None;
     let mut sans = Vec::new();
+    let mut keychain = true;
 
     let mut index = 0;
     while index < args.len() {
@@ -288,6 +289,9 @@ fn parse_serve_options(args: &[String]) -> anyhow::Result<rustvnc_agent::server:
                 index += 1;
                 sans.push(args.get(index).context("--san requires a value")?.clone());
             }
+            "--no-keychain" => {
+                keychain = false;
+            }
             other => bail!("unknown --serve option: {other}"),
         }
         index += 1;
@@ -298,6 +302,7 @@ fn parse_serve_options(args: &[String]) -> anyhow::Result<rustvnc_agent::server:
         state_dir,
         pair_code,
         sans,
+        keychain,
     })
 }
 

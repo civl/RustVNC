@@ -21,6 +21,7 @@ rand = "0.9"
 rcgen = { version = "0.14", features = ["x509-parser"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 rustls-pemfile = "2"
+security-framework = "3"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 signal-hook = "0.3"
@@ -31,6 +32,9 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tray-icon = { version = "0.26", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 strip = true

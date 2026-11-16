@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -10,10 +10,19 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use subtle::ConstantTimeEq;
+use tokio::sync::{oneshot, watch};
+use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 use crate::protocol::{self, ControlMsg};
 use crate::tls;
+
+const PAIRING_TTL: Duration = Duration::from_secs(300);
+const PAIRING_GLOBAL_ATTEMPTS: u32 = 5;
+const PAIRING_PER_IP_LIMIT: u32 = 5;
+const PAIRING_PER_IP_WINDOW: Duration = Duration::from_secs(600);
+const CONNECTION_PER_IP_LIMIT: u32 = 30;
+const CONNECTION_PER_IP_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
@@ -21,22 +30,56 @@ pub struct ServeOptions {
     pub state_dir: PathBuf,
     pub pair_code: Option<String>,
     pub sans: Vec<String>,
+    pub keychain: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServeInfo {
+    pub local_addr: SocketAddr,
+    pub pair_code: String,
+    pub server_fingerprint: String,
+    pub state_dir: PathBuf,
 }
 
 pub async fn run(options: ServeOptions) -> Result<()> {
+    // Keep the sender alive for the lifetime of the server so the receiver
+    // only observes a change when we explicitly request shutdown.
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    run_with_shutdown(options, None, shutdown_rx).await
+}
+
+pub async fn run_with_shutdown(
+    options: ServeOptions,
+    ready: Option<oneshot::Sender<ServeInfo>>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<()> {
     tls::install_provider();
 
-    let material = Arc::new(tls::ensure_material(&options.state_dir, &options.sans)?);
+    let material = Arc::new(tls::ensure_material(
+        &options.state_dir,
+        &options.sans,
+        options.keychain,
+    )?);
     let allowlist = Arc::new(Allowlist::load(options.state_dir.join("clients.txt"))?);
     let code = options
         .pair_code
         .clone()
         .unwrap_or_else(generate_pairing_code);
-    let pairing = Arc::new(Pairing::new(code.clone(), Duration::from_secs(300)));
+    let pairing = Arc::new(Pairing::new(
+        code.clone(),
+        PAIRING_TTL,
+        PAIRING_GLOBAL_ATTEMPTS,
+    ));
 
     let endpoint = quinn::Endpoint::server(tls::server_config(&material)?, options.listen)
         .context("bind QUIC endpoint")?;
     let local = endpoint.local_addr().context("local address")?;
+    let info = ServeInfo {
+        local_addr: local,
+        pair_code: code.clone(),
+        server_fingerprint: material.server_fingerprint.clone(),
+        state_dir: options.state_dir.clone(),
+    };
 
     println!("LISTENING: {local}");
     println!("PAIRING CODE: {code}");
@@ -44,26 +87,77 @@ pub async fn run(options: ServeOptions) -> Result<()> {
     println!("STATE DIR: {}", options.state_dir.display());
     info!(%local, "agent control server listening");
 
-    while let Some(incoming) = endpoint.accept().await {
-        let material = Arc::clone(&material);
-        let allowlist = Arc::clone(&allowlist);
-        let pairing = Arc::clone(&pairing);
-
-        tokio::spawn(async move {
-            match incoming.await {
-                Ok(connection) => {
-                    let remote = connection.remote_address();
-                    match handle_connection(connection, material, allowlist, pairing).await {
-                        Ok(()) => info!(%remote, "connection closed"),
-                        Err(err) => warn!(%remote, "connection failed: {err:#}"),
-                    }
-                }
-                Err(err) => warn!("incoming QUIC connection failed: {err}"),
-            }
-        });
+    if let Some(ready) = ready {
+        let _ = ready.send(info);
     }
 
+    let pair_limiter = Arc::new(RateLimiter::new(
+        PAIRING_PER_IP_LIMIT,
+        PAIRING_PER_IP_WINDOW,
+    ));
+    let connection_limiter = Arc::new(RateLimiter::new(
+        CONNECTION_PER_IP_LIMIT,
+        CONNECTION_PER_IP_WINDOW,
+    ));
+    let mut tasks = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            _ = shutdown_requested(&mut shutdown) => break,
+            incoming = endpoint.accept() => {
+                let Some(incoming) = incoming else { break };
+                let ip = incoming.remote_address().ip();
+                if !connection_limiter.allow(ip) {
+                    warn!(%ip, "connection rate limited");
+                    incoming.refuse();
+                    continue;
+                }
+
+                let material = Arc::clone(&material);
+                let allowlist = Arc::clone(&allowlist);
+                let pairing = Arc::clone(&pairing);
+                let pair_limiter = Arc::clone(&pair_limiter);
+
+                tasks.spawn(async move {
+                    match incoming.await {
+                        Ok(connection) => {
+                            let remote = connection.remote_address();
+                            match handle_connection(
+                                connection,
+                                material,
+                                allowlist,
+                                pairing,
+                                pair_limiter,
+                            )
+                            .await
+                            {
+                                Ok(()) => info!(%remote, "connection closed"),
+                                Err(err) => warn!(%remote, "connection failed: {err:#}"),
+                            }
+                        }
+                        Err(err) => warn!("incoming QUIC connection failed: {err}"),
+                    }
+                });
+            }
+        }
+    }
+
+    endpoint.close(0u32.into(), b"shutdown");
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    info!("control server stopped");
     Ok(())
+}
+
+async fn shutdown_requested(shutdown: &mut watch::Receiver<bool>) {
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 async fn handle_connection(
@@ -71,6 +165,7 @@ async fn handle_connection(
     material: Arc<tls::Material>,
     allowlist: Arc<Allowlist>,
     pairing: Arc<Pairing>,
+    pair_limiter: Arc<RateLimiter>,
 ) -> Result<()> {
     let (mut send, mut recv) = connection
         .accept_bi()
@@ -79,30 +174,50 @@ async fn handle_connection(
 
     let first = protocol::read_msg(&mut recv).await?;
     match first {
-        ControlMsg::PairRequest { code, client_name } => match pairing.verify(&code) {
-            Ok(()) => {
-                let issued = tls::issue_client_cert(&material, &client_name)?;
-                allowlist.add(&issued.fingerprint, &client_name)?;
-                protocol::write_msg(
+        ControlMsg::PairRequest {
+            code,
+            client_name,
+            csr_pem,
+        } => {
+            let ip = connection.remote_address().ip();
+            if !pair_limiter.allow(ip) {
+                warn!(%ip, "pairing rate limited");
+                let _ = protocol::write_msg(
                     &mut send,
-                    &ControlMsg::PairResponse {
-                        client_cert_pem: issued.cert_pem,
-                        client_key_pem: issued.key_pem,
-                        ca_cert_pem: material.ca_cert_pem.clone(),
-                        server_fingerprint: material.server_fingerprint.clone(),
-                    },
+                    &protocol::error(
+                        protocol::error_code::TOO_MANY_ATTEMPTS,
+                        "too many pairing attempts from this address",
+                    ),
                 )
-                .await?;
-                let _ = send.finish();
-                let _ = tokio::time::timeout(Duration::from_secs(5), connection.closed()).await;
+                .await;
+                finish_and_wait(&mut send, &connection).await;
+                return Ok(());
             }
-            Err(err) => {
-                let _ = protocol::write_msg(&mut send, &protocol::error(err.code(), err.message()))
-                    .await;
-                let _ = send.finish();
-                let _ = tokio::time::timeout(Duration::from_secs(2), connection.closed()).await;
+
+            match pairing.verify(&code) {
+                Ok(()) => {
+                    let issued = tls::issue_client_cert(&material, &client_name, &csr_pem)?;
+                    allowlist.add(&issued.fingerprint, &client_name)?;
+                    protocol::write_msg(
+                        &mut send,
+                        &ControlMsg::PairResponse {
+                            client_cert_pem: issued.cert_pem,
+                            ca_cert_pem: material.ca_cert_pem.clone(),
+                            server_fingerprint: material.server_fingerprint.clone(),
+                        },
+                    )
+                    .await?;
+                    let _ = send.finish();
+                    let _ = tokio::time::timeout(Duration::from_secs(5), connection.closed()).await;
+                }
+                Err(err) => {
+                    let _ =
+                        protocol::write_msg(&mut send, &protocol::error(err.code(), err.message()))
+                            .await;
+                    finish_and_wait(&mut send, &connection).await;
+                }
             }
-        },
+        }
         ControlMsg::Hello {
             proto,
             client,
@@ -223,6 +338,7 @@ struct Pairing {
     expires_at: Instant,
     used: AtomicBool,
     attempts: AtomicU32,
+    max_attempts: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -234,12 +350,13 @@ enum PairingError {
 }
 
 impl Pairing {
-    fn new(code: String, ttl: Duration) -> Self {
+    fn new(code: String, ttl: Duration, max_attempts: u32) -> Self {
         Self {
             code,
             expires_at: Instant::now() + ttl,
             used: AtomicBool::new(false),
             attempts: AtomicU32::new(0),
+            max_attempts,
         }
     }
 
@@ -252,7 +369,7 @@ impl Pairing {
         }
 
         let attempts = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
-        if attempts > 5 {
+        if attempts > self.max_attempts {
             return Err(PairingError::TooManyAttempts);
         }
 
@@ -288,6 +405,47 @@ impl PairingError {
             PairingError::AlreadyPaired => "pairing code already used",
             PairingError::TooManyAttempts => "too many pairing attempts",
         }
+    }
+}
+
+struct RateLimiter {
+    limit: u32,
+    window: Duration,
+    entries: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
+}
+
+impl RateLimiter {
+    fn new(limit: u32, window: Duration) -> Self {
+        Self {
+            limit,
+            window,
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn allow(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut entries = self.entries.lock().expect("rate limiter mutex poisoned");
+        let queue = entries.entry(ip).or_default();
+
+        while let Some(front) = queue.front() {
+            if now.duration_since(*front) > self.window {
+                queue.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        let allowed = (queue.len() as u32) < self.limit;
+        if allowed {
+            queue.push_back(now);
+        }
+
+        if entries.len() > 4096 {
+            entries.retain(|_, queue| !queue.is_empty());
+        }
+
+        allowed
     }
 }
 
@@ -339,5 +497,21 @@ impl Allowlist {
         writeln!(file, "{fingerprint} {safe_name}")?;
         let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RateLimiter;
+    use std::net::IpAddr;
+    use std::time::Duration;
+
+    #[test]
+    fn rate_limiter_enforces_window() {
+        let limiter = RateLimiter::new(2, Duration::from_secs(60));
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(limiter.allow(ip));
+        assert!(limiter.allow(ip));
+        assert!(!limiter.allow(ip));
     }
 }

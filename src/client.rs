@@ -99,12 +99,10 @@ pub async fn pair(options: PairOptions) -> Result<()> {
             ca_cert_pem,
             server_fingerprint,
         } => {
-            if let Some(expected) = &options.expect_fingerprint {
-                if !server_fingerprint.eq_ignore_ascii_case(expected) {
-                    bail!(
-                        "server fingerprint mismatch: expected {expected}, got {server_fingerprint}"
-                    );
-                }
+            if let Some(expected) = &options.expect_fingerprint
+                && !server_fingerprint.eq_ignore_ascii_case(expected)
+            {
+                bail!("server fingerprint mismatch: expected {expected}, got {server_fingerprint}");
             }
 
             save_state(
@@ -307,10 +305,10 @@ pub async fn audio(options: AudioOptions) -> Result<()> {
                         continue;
                     }
                 };
-                if let Some(previous) = last_seq {
-                    if packet.seq != previous.wrapping_add(1) {
-                        warn!("audio packet gap: {} -> {}", previous, packet.seq);
-                    }
+                if let Some(previous) = last_seq
+                    && packet.seq != previous.wrapping_add(1)
+                {
+                    warn!("audio packet gap: {} -> {}", previous, packet.seq);
                 }
                 last_seq = Some(packet.seq);
 
@@ -322,7 +320,7 @@ pub async fn audio(options: AudioOptions) -> Result<()> {
                 for sample in &pcm[..decoded * 2] {
                     squared_sum += (*sample as f64) * (*sample as f64);
                 }
-                if packets % 50 == 0 {
+                if packets.is_multiple_of(50) {
                     println!("audio: packets={packets} seq={} bytes={bytes}", packet.seq);
                 }
             }
@@ -410,10 +408,10 @@ async fn resolve(addr: &str) -> Result<SocketAddr> {
 }
 
 fn host_from_addr(addr: &str) -> String {
-    if let Some(rest) = addr.strip_prefix('[') {
-        if let Some(end) = rest.find(']') {
-            return rest[..end].to_string();
-        }
+    if let Some(rest) = addr.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        return rest[..end].to_string();
     }
     addr.rsplit_once(':')
         .map(|(host, _)| host.to_string())

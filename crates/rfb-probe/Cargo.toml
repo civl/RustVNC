@@ -1,0 +1,20 @@
+[package]
+name = "rfb-probe"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "RustVNC M0 probe: RFB handshake/auth/encodings/input against macOS Screen Sharing"
+
+[dev-dependencies]
+tempfile = "3"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+minifb = "0.29"
+png = "0.18"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+vnc-rs = "0.6"

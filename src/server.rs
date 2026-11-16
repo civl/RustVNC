@@ -420,19 +420,20 @@ async fn handle_connection(
                         }
                         match clipboard::get_text().await {
                             Ok(Some(text)) => {
-                                if let Some(text) = clipboard::normalize(&text) {
-                                    if text != last_sent && text != last_received {
-                                        if protocol::write_msg(
-                                            &mut send,
-                                            &ControlMsg::ClipboardText { text: text.clone() },
-                                        )
-                                        .await
-                                        .is_err()
-                                        {
-                                            break;
-                                        }
-                                        last_sent = text;
+                                if let Some(text) = clipboard::normalize(&text)
+                                    && text != last_sent
+                                    && text != last_received
+                                {
+                                    if protocol::write_msg(
+                                        &mut send,
+                                        &ControlMsg::ClipboardText { text: text.clone() },
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        break;
                                     }
+                                    last_sent = text;
                                 }
                             }
                             Ok(None) => {}

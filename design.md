@@ -798,6 +798,8 @@ macOS 系统音频 ──► ScreenCaptureKit（macOS 13+）
 
 #### M0 · 协议可行性（3 周）
 
+> **状态（2026-11-16）**：条件通过。RFB 003.889 握手、安全类型、ARD/VNC 认证失败路径、mock 出画与输入已验证；真机成功出画待 macOS 凭据。详见 [M0-COMPATIBILITY.md](M0-COMPATIBILITY.md)。
+
 **目标**：用最小代码证明"能连上、能出画、能输入"，并把 macOS 的协议差异固化成文档与测试向量。
 
 工作项：

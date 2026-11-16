@@ -1,8 +1,12 @@
+[workspace]
+members = ["crates/rfb-probe"]
+resolver = "3"
+
 [package]
 name = "rustvnc-agent"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 description = "RustVNC macOS agent (A2b: menu bar server, clipboard, Core Audio Tap + Opus)"
 

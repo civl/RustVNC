@@ -31,6 +31,11 @@ struct Cli {
     password: Option<String>,
     #[arg(long, value_enum, default_value_t = AuthMode::Auto)]
     auth: AuthMode,
+    /// Ask the server to switch to this resolution, e.g. `1920x1080`
+    /// (RFB ExtendedDesktopSize; most macOS builds do not implement it).
+    #[arg(long)]
+    resize: Option<String>,
+
     /// Also request Apple's private pseudo-encodings (1104/1105/1107/1109/1110)
     /// so their bodies can be captured and decoded.
     #[arg(long)]
@@ -121,6 +126,10 @@ async fn run(cli: Cli) -> Result<()> {
         connector = connector.add_encoding(encoding);
     }
 
+    if cli.resize.is_some() {
+        connector = connector.add_encoding(VncEncoding::ExtendedDesktopSizePseudo);
+    }
+
     if cli.apple {
         for encoding in [
             VncEncoding::AppleCursorPseudo,
@@ -155,6 +164,21 @@ async fn run(cli: Cli) -> Result<()> {
     println!("server_name: {}", client.server_name());
     println!("bpp: {}", cli.bpp);
     println!("encoding: {:?}", cli.encoding);
+
+    if let Some(spec) = cli.resize.as_deref() {
+        let (width, height) = spec
+            .split_once('x')
+            .and_then(|(w, h)| Some((w.parse::<u16>().ok()?, h.parse::<u16>().ok()?)))
+            .with_context(|| format!("--resize expects WIDTHxHEIGHT, got {spec}"))?;
+        match tokio::time::timeout(Duration::from_secs(5), client.resize_desktop(width, height))
+            .await
+        {
+            Ok(Ok(layout)) => println!("resize: applied {layout:?}"),
+            Ok(Err(err)) => println!("resize: refused ({err})"),
+            Err(_) => println!("resize: no answer within 5s"),
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 
     let mut framebuffer = FrameBuffer::new(cli.bpp);
     let mut window: Option<minifb::Window> = None;

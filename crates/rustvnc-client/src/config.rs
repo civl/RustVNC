@@ -228,7 +228,12 @@ impl ClientConfig {
             encodings.push(VncEncoding::Zlib);
         }
         encodings.push(VncEncoding::CopyRect);
-        encodings.push(VncEncoding::CursorPseudo);
+        // Cursor shapes are only defined for 32 bpp in this engine, and the UI
+        // draws the local pointer anyway; at 16 bpp the updates would be
+        // discarded and only cost bandwidth.
+        if self.bpp == 32 {
+            encodings.push(VncEncoding::CursorPseudo);
+        }
         encodings.push(VncEncoding::DesktopSizePseudo);
         if self.apple_encodings {
             encodings.extend([

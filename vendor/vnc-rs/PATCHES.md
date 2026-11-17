@@ -105,6 +105,20 @@ correctly`. Every 5K/6K Mac was effectively unreachable.
 - Regression tests: `limits::tests::{accepts_5k_retina_framebuffers,
   rejects_oversized_with_a_distinct_error, rejects_zero_dimensions_as_corruption}`.
 
+## Cursor updates at 16 bpp used to kill the session
+
+`codec::cursor` required 32 bpp and returned `WrongPixelFormat` otherwise. The
+client asks for `CursorPseudo` (-239) to get a remote pointer shape, so on a
+16 bpp ("极速" quality) session macOS would answer with a cursor rectangle as
+soon as the pointer moved, and the session died with "Unknown pixel format"
+surfaced as `[INTERNAL]`.
+
+The body is perfectly well defined at any bpp, so the decoder now consumes it
+and reports an empty shape instead of failing. Two regression tests cover it
+(`sixteen_bpp_cursor_is_skipped_not_fatal`,
+`thirty_two_bpp_cursor_still_decodes`), and the client no longer advertises
+`CursorPseudo` at 16 bpp, because the UI draws the local pointer anyway and
+those updates would only cost bandwidth.
 ## Diagnostics kept in the engine
 
 `RUST_LOG=vnc=trace` now prints the server's framebuffer size at `ServerInit` and

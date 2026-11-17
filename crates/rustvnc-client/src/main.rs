@@ -1452,6 +1452,20 @@ impl eframe::App for App {
                     if self.session.is_some() {
                         ui.separator();
                         ui.label(&self.stats);
+                        // RFB has no way to ask macOS for a smaller framebuffer
+                        // (it does not implement SetDesktopSize), so the only
+                        // lever is the Mac's own display mode. Say so instead of
+                        // leaving the user to wonder why 5K is heavy.
+                        if self.frame.width > 2560 || self.frame.height > 1440 {
+                            ui.separator();
+                            ui.colored_label(
+                                egui::Color32::from_rgb(214, 162, 40),
+                                self.lang.t(
+                                    "远端分辨率较高：把 Mac 的显示器设为 1920×1080 可显著降低带宽",
+                                    "High remote resolution: set the Mac's display to 1920×1080 to cut bandwidth",
+                                ),
+                            );
+                        }
                     }
                 });
             });

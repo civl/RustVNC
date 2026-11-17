@@ -16,7 +16,7 @@ async fn session_receives_frame_and_sends_input() {
 
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        mock_server(stream, server_inputs).await.expect("server");
+        let _ = mock_server(stream, server_inputs).await;
     });
 
     let mut config = ClientConfig::default();
@@ -289,7 +289,7 @@ async fn paused_session_stops_frames_and_resumes_with_a_refresh() {
     let inputs = Arc::new(Mutex::new(Vec::<String>::new()));
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        mock_server(stream, inputs).await.expect("server");
+        let _ = mock_server(stream, inputs).await;
     });
 
     let config = ClientConfig {

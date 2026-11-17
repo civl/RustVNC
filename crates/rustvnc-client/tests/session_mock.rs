@@ -93,7 +93,6 @@ async fn mock_server(mut stream: TcpStream, inputs: Arc<Mutex<Vec<String>>>) -> 
     stream.write_all(&(10u32).to_be_bytes()).await?;
     stream.write_all(b"mock-vnc!!").await?;
 
-    let mut sent = false;
     loop {
         let mut kind = [0u8; 1];
         if stream.read_exact(&mut kind).await.is_err() {
@@ -114,12 +113,7 @@ async fn mock_server(mut stream: TcpStream, inputs: Arc<Mutex<Vec<String>>>) -> 
             3 => {
                 let mut rest = [0u8; 9];
                 stream.read_exact(&mut rest).await?;
-                if !sent {
-                    send_frame(&mut stream).await?;
-                    sent = true;
-                } else {
-                    stream.write_all(&[0, 0, 0, 0]).await?;
-                }
+                send_frame(&mut stream).await?;
             }
             4 => {
                 let mut rest = [0u8; 7];
@@ -286,4 +280,57 @@ async fn serve_one_frame(stream: &mut TcpStream) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paused_session_stops_frames_and_resumes_with_a_refresh() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let inputs = Arc::new(Mutex::new(Vec::<String>::new()));
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        mock_server(stream, inputs).await.expect("server");
+    });
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port: addr.port(),
+        bpp: 32,
+        auth: rustvnc_client::config::AuthMode::Auto,
+        ..ClientConfig::default()
+    };
+    let mut session = Session::start(config, String::new()).expect("start");
+    let wait_raw = |session: &Session| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            while let Some(event) = session.try_recv() {
+                if matches!(event, SessionEvent::RawImage { .. }) {
+                    return true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    };
+    assert!(wait_raw(&session), "no initial frame");
+
+    session.set_paused(true);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    while session.try_recv().is_some() {}
+    let paused_deadline = Instant::now() + Duration::from_millis(400);
+    let mut frames_while_paused = 0;
+    while Instant::now() < paused_deadline {
+        while let Some(event) = session.try_recv() {
+            if matches!(event, SessionEvent::RawImage { .. }) {
+                frames_while_paused += 1;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(frames_while_paused, 0, "paused tab must not receive frames");
+
+    session.set_paused(false);
+    assert!(wait_raw(&session), "resume did not request a fresh frame");
+    session.close();
+    server.await.expect("server");
 }

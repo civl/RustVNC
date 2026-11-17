@@ -13,6 +13,10 @@ use crate::ssh::SshTunnel;
 #[derive(Debug)]
 pub enum SessionCommand {
     Input(X11Event),
+    /// Keep the connection alive but stop polling for frames and drop updates.
+    /// Used when a tab is in the background so inactive sessions do not queue
+    /// megabytes of frame data.
+    Pause(bool),
     Close,
 }
 
@@ -195,6 +199,10 @@ impl Session {
         let _ = self.commands.send(SessionCommand::Input(event));
     }
 
+    pub fn set_paused(&self, paused: bool) {
+        let _ = self.commands.send(SessionCommand::Pause(paused));
+    }
+
     /// Ask the session thread to stop.
     ///
     /// This never joins: the worker may still be blocked in a connect or a
@@ -360,6 +368,7 @@ async fn run_session(
     events: Sender<SessionEvent>,
 ) {
     let mut attempt = 0u32;
+    let mut paused = false;
     loop {
         let started = Instant::now();
         match connect_and_loop(
@@ -367,6 +376,7 @@ async fn run_session(
             config.clone(),
             password.clone(),
             &mut commands,
+            &mut paused,
             &events,
         )
         .await
@@ -419,6 +429,7 @@ async fn connect_and_loop(
     config: ClientConfig,
     password: String,
     commands: &mut UnboundedReceiver<SessionCommand>,
+    paused: &mut bool,
     events: &Sender<SessionEvent>,
 ) -> std::result::Result<(), SessionFailure> {
     if config.auth == AuthMode::Ard && config.user.trim().is_empty() {
@@ -537,7 +548,21 @@ async fn connect_and_loop(
         tokio::select! {
             command = commands.recv() => {
                 match command {
+                    Some(SessionCommand::Pause(value)) => {
+                        *paused = value;
+                        if !*paused {
+                            update_in_flight = false;
+                            next_request = tokio::time::Instant::now();
+                            if let Err(err) = client.input(X11Event::FullRefresh).await {
+                                let failure = SessionFailure::from_vnc(err).after_connect();
+                                return Err(failure);
+                            }
+                        }
+                    }
                     Some(SessionCommand::Input(event)) => {
+                        if *paused {
+                            continue;
+                        }
                         if let Err(err) = client.input(event).await {
                             let failure = SessionFailure::from_vnc(err).after_connect();
                             let _ = events.send(SessionEvent::Error {
@@ -556,7 +581,11 @@ async fn connect_and_loop(
             // burns a full core whenever the screen is idle.
             event = client.recv_event() => {
                 match event {
-                    Ok(event) => match event {
+                    Ok(event) => {
+                        if *paused && !matches!(event, VncEvent::Error(_)) {
+                            continue;
+                        }
+                        match event {
                         VncEvent::SetResolution(Screen { width: new_width, height: new_height }) => {
                             width = new_width as usize;
                             height = new_height as usize;
@@ -620,7 +649,8 @@ async fn connect_and_loop(
                             return Err(SessionFailure::from_message(err).after_connect());
                         }
                         _ => {}
-                    },
+                        }
+                    }
                     Err(vnc::VncError::ClientNotRunning) => {
                         // The engine stopped: the peer closed the connection or
                         // the decoder task ended. Treat it as a recoverable drop
@@ -650,6 +680,10 @@ async fn connect_and_loop(
                 }
             }
             _ = tokio::time::sleep_until(next_request) => {
+                if *paused {
+                    next_request = tokio::time::Instant::now() + Duration::from_millis(250);
+                    continue;
+                }
                 // A lost update must not stall the session forever: after a few
                 // intervals without the marker, re-arm and try again.
                 if update_in_flight && in_flight_since.elapsed() > FRAME_TIMEOUT {

@@ -9,6 +9,7 @@ description = "RustVNC Windows client (M1 session core + egui UI)"
 [dependencies]
 ab_glyph = "0.2"
 anyhow = "1"
+auto-launch = "0.6"
 arboard = "3"
 dirs = "7"
 eframe = { version = "0.33", default-features = false, features = ["glow", "wgpu", "default_fonts"] }
@@ -20,6 +21,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tray-icon = { version = "0.26", default-features = false }
 vnc-rs = "0.6"
 rustvnc-agent-client = { path = "../agent-client" }
 # Enabling eframe's `wgpu` feature alone is not enough: without this direct dependency

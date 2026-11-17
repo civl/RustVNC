@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+use auto_launch::{AutoLaunch, AutoLaunchBuilder};
 use eframe::egui;
 use rustvnc_agent_client::{
     AgentEvent, AgentSession, PairConfig, SessionConfig as AgentSessionConfig, pair,
@@ -15,6 +17,8 @@ use rustvnc_client::input::{key_to_keysym, text_to_keysyms};
 use rustvnc_client::profiles::{Profile, ProfileStore};
 use rustvnc_client::session::{Session, SessionEvent};
 use rustvnc_client::ssh::{self, HostKeyProbe};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use vnc::{ClientKeyEvent, ClientMouseEvent, Rect, X11Event};
 
 /// How the UI should be rendered, in preference order.
@@ -186,6 +190,29 @@ struct App {
     agent_pair_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// Floating key-mapping editor.
     show_keymap: bool,
+    /// Tabs with inactive sessions. The active tab's session lives in `session`
+    /// and its frame in `frame` so all existing rendering code stays single-tab.
+    tabs: Vec<Tab>,
+    active_tab: Option<usize>,
+    autostart: Option<AutoLaunch>,
+    autostart_enabled: bool,
+    _tray: Option<TrayIcon>,
+    tray_rx: Option<Receiver<TrayAction>>,
+    quitting: bool,
+    hidden_to_tray: bool,
+    start_minimized: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TrayAction {
+    Show,
+    Quit,
+}
+
+struct Tab {
+    profile: Profile,
+    /// Present only while this tab is inactive; the active session is in `App`.
+    session: Option<Session>,
 }
 
 /// The four modifiers RFB can express, as remote state rather than per-event
@@ -287,6 +314,8 @@ impl App {
             .first()
             .cloned()
             .unwrap_or_else(|| Profile::new("New Mac", ClientConfig::default()));
+        let (tray, tray_rx) = build_tray(cc.egui_ctx.clone());
+        let (autostart, autostart_enabled) = init_autostart();
         let selected_id = profiles
             .profiles()
             .first()
@@ -329,11 +358,25 @@ impl App {
             pending_resolution: None,
             agent_pair_rx: None,
             show_keymap: false,
+            tabs: Vec::new(),
+            active_tab: None,
+            autostart,
+            autostart_enabled,
+            _tray: tray,
+            tray_rx,
+            quitting: false,
+            hidden_to_tray: false,
+            start_minimized: std::env::args().any(|arg| arg == "--minimized"),
         }
     }
 
     fn select_profile(&mut self, id: &str) {
         if let Some(profile) = self.profiles.get(id).cloned() {
+            self.stash_active_tab();
+            self.active_tab = None;
+            self.session = None;
+            self.agent = None;
+            self.reset_visible_session();
             self.password = self
                 .credentials
                 .get(&profile.id)
@@ -350,6 +393,210 @@ impl App {
                 .unwrap_or_default();
             self.host_key_probe = None;
             self.error = None;
+            self.status = "Ready".to_string();
+        }
+    }
+
+    /// Move the active session into its tab and pause it. The active session
+    /// fields stay for the one visible tab, keeping the render path unchanged.
+    fn stash_active_tab(&mut self) {
+        let Some(index) = self.active_tab else {
+            return;
+        };
+        self.sync_modifiers(ModifierState::default());
+        if let Some(session) = self.session.as_ref() {
+            session.set_paused(true);
+        }
+        if let Some(session) = self.session.take() {
+            self.tabs[index].session = Some(session);
+        }
+        if let Some(mut agent) = self.agent.take() {
+            agent.stop();
+        }
+        self.agent_status.clear();
+        self.pending_resolution = None;
+        self.tabs[index].profile = self.draft.clone();
+        self.reset_visible_session();
+    }
+
+    fn reset_visible_session(&mut self) {
+        self.frame = Frame::default();
+        self.texture = None;
+        self.frame_dirty = false;
+        self.pending_rects.clear();
+        self.image_rect = None;
+        self.last_pointer = None;
+        self.last_texture_size = (0, 0);
+        self.sent_modifiers = ModifierState::default();
+        self.remote_cursor = None;
+        self.frame_complete = false;
+        self.first_pending = None;
+        self.stats.clear();
+    }
+
+    fn activate_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() || Some(index) == self.active_tab {
+            return;
+        }
+        self.stash_active_tab();
+        self.active_tab = Some(index);
+        self.draft = self.tabs[index].profile.clone();
+        self.password = self
+            .credentials
+            .get(&self.draft.id)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        self.draft.config.ssh.password = self
+            .credentials
+            .get(&ssh_credential_key(&self.draft.id))
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        self.selected_id = Some(self.draft.id.clone());
+        self.error = None;
+        self.reset_visible_session();
+        self.clipboard_sync = true;
+        self.last_local_clipboard = read_local_clipboard();
+        self.last_remote_clipboard = None;
+        if let Some(session) = self.tabs[index].session.take() {
+            session.set_paused(false);
+            self.status = format!("Resuming {}", session.local_addr());
+            self.session = Some(session);
+            self.start_agent();
+        } else {
+            self.session = None;
+            self.status = "Ready".to_string();
+        }
+    }
+
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if Some(index) == self.active_tab {
+            self.disconnect();
+            self.active_tab = None;
+            self.tabs.remove(index);
+            self.session = None;
+            self.reset_visible_session();
+            if !self.tabs.is_empty() {
+                let next = index.min(self.tabs.len() - 1);
+                self.activate_tab(next);
+            } else {
+                self.status = "Ready".to_string();
+            }
+        } else {
+            let mut tab = self.tabs.remove(index);
+            if let Some(mut session) = tab.session.take() {
+                session.close();
+            }
+            if let Some(active) = self.active_tab
+                && active > index
+            {
+                self.active_tab = Some(active - 1);
+            }
+        }
+    }
+
+    fn set_autostart(&mut self, enabled: bool) {
+        let Some(auto) = self.autostart.as_ref() else {
+            self.error = Some("当前平台不支持开机自启".to_string());
+            return;
+        };
+        let result = if enabled {
+            auto.enable()
+        } else {
+            auto.disable()
+        };
+        match result {
+            Ok(()) => {
+                self.autostart_enabled = enabled;
+                self.status = if enabled {
+                    "已开启开机自启".to_string()
+                } else {
+                    "已关闭开机自启".to_string()
+                };
+                self.error = None;
+            }
+            Err(err) => {
+                self.autostart_enabled = !enabled;
+                self.error = Some(format!("设置开机自启失败: {err}"));
+            }
+        }
+    }
+
+    fn handle_tray(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.tray_rx.as_ref() else {
+            return;
+        };
+        let mut actions = Vec::new();
+        while let Ok(action) = rx.try_recv() {
+            actions.push(action);
+        }
+        for action in actions {
+            match action {
+                TrayAction::Show => {
+                    self.hidden_to_tray = false;
+                    self.status = "Ready".to_string();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    ctx.request_repaint();
+                }
+                TrayAction::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    fn tab_bar(&mut self, ui: &mut egui::Ui) {
+        let mut activate = None;
+        let mut close = None;
+        ui.horizontal_wrapped(|ui| {
+            for (index, tab) in self.tabs.iter().enumerate() {
+                let active = Some(index) == self.active_tab;
+                let title = if tab.profile.name.trim().is_empty() {
+                    tab.profile.config.host.clone()
+                } else {
+                    tab.profile.name.clone()
+                };
+                if ui.selectable_label(active, title).clicked() {
+                    activate = Some(index);
+                }
+                if ui
+                    .small_button("×")
+                    .on_hover_text(self.lang.t("关闭标签", "Close tab"))
+                    .clicked()
+                {
+                    close = Some(index);
+                }
+                ui.separator();
+            }
+            if ui
+                .button("+")
+                .on_hover_text(self.lang.t("新建标签", "New tab"))
+                .clicked()
+            {
+                activate = None;
+                close = None;
+                self.stash_active_tab();
+                self.active_tab = None;
+                self.session = None;
+                self.agent = None;
+                self.reset_visible_session();
+                self.draft = Profile::new("New Mac", ClientConfig::default());
+                self.password.clear();
+                self.selected_id = None;
+                self.status = "Ready".to_string();
+            }
+        });
+        if let Some(index) = activate {
+            self.activate_tab(index);
+        } else if let Some(index) = close {
+            self.close_tab(index);
         }
     }
 
@@ -407,10 +654,16 @@ impl App {
     }
 
     fn new_profile(&mut self) {
+        self.stash_active_tab();
+        self.active_tab = None;
+        self.session = None;
+        self.agent = None;
+        self.reset_visible_session();
         self.draft = Profile::new("New Mac", ClientConfig::default());
         self.selected_id = None;
         self.password.clear();
         self.error = None;
+        self.status = "Ready".to_string();
     }
 
     fn save_profile(&mut self) {
@@ -425,6 +678,9 @@ impl App {
             self.error = Some(format!("save profile: {err:#}"));
         } else {
             self.selected_id = Some(self.draft.id.clone());
+            if let Some(index) = self.active_tab {
+                self.tabs[index].profile = self.draft.clone();
+            }
         }
     }
 
@@ -458,6 +714,15 @@ impl App {
         if self.draft.config.host.trim().is_empty() {
             self.error = Some("host is required".to_string());
             return;
+        }
+        if self.active_tab.is_none() {
+            self.tabs.push(Tab {
+                profile: self.draft.clone(),
+                session: None,
+            });
+            self.active_tab = Some(self.tabs.len() - 1);
+        } else if let Some(index) = self.active_tab {
+            self.tabs[index].profile = self.draft.clone();
         }
         if self.remember && !self.password.is_empty() {
             let _ = self.credentials.set(&self.draft.id, &self.password);
@@ -1081,6 +1346,16 @@ impl App {
                         "Scale requests with latency (off = fixed quality rate)",
                     ),
                 );
+                ui.end_row();
+
+                ui.label(lang.t("开机自启", "Launch at login"));
+                let mut autostart = self.autostart_enabled;
+                if ui
+                    .checkbox(&mut autostart, lang.t("登录时自动启动", "Launch at login"))
+                    .changed()
+                {
+                    self.set_autostart(autostart);
+                }
                 ui.end_row();
 
                 ui.label(lang.t("远端分辨率", "Remote resolution"));
@@ -1718,6 +1993,21 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_tray(ctx);
+        if self.start_minimized && self._tray.is_some() {
+            self.start_minimized = false;
+            self.hidden_to_tray = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        if ctx.input(|input| input.viewport().close_requested())
+            && !self.quitting
+            && self._tray.is_some()
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.hidden_to_tray = true;
+            self.status = "已最小化到托盘".to_string();
+        }
         self.poll_session(ctx);
 
         // App-level shortcuts run before input forwarding: otherwise F11 would
@@ -1766,6 +2056,7 @@ impl eframe::App for App {
                         }
                     });
                 });
+                self.tab_bar(ui);
             });
 
             egui::SidePanel::left("profiles")
@@ -1943,6 +2234,95 @@ fn keymap_row(ui: &mut egui::Ui, label: &str, id: &str, target: &mut ModifierTar
             }
         });
     ui.end_row();
+}
+
+fn init_autostart() -> (Option<AutoLaunch>, bool) {
+    let Ok(exe) = std::env::current_exe() else {
+        return (None, false);
+    };
+    let path = exe.display().to_string();
+    let mut builder = AutoLaunchBuilder::new();
+    builder
+        .set_app_name("RustVNC")
+        .set_app_path(&path)
+        .set_args(&["--minimized"]);
+    let auto = builder.build().ok();
+    let enabled = auto
+        .as_ref()
+        .and_then(|auto| auto.is_enabled().ok())
+        .unwrap_or(false);
+    (auto, enabled)
+}
+
+fn build_tray(ctx: egui::Context) -> (Option<TrayIcon>, Option<Receiver<TrayAction>>) {
+    let menu = Menu::new();
+    let show = MenuItem::with_id("show", "显示 RustVNC", true, None);
+    let quit = MenuItem::with_id("quit", "退出", true, None);
+    if menu.append(&show).is_err()
+        || menu.append(&PredefinedMenuItem::separator()).is_err()
+        || menu.append(&quit).is_err()
+    {
+        return (None, None);
+    }
+    let Some(icon) = make_tray_icon() else {
+        return (None, None);
+    };
+    let tray = match TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_icon(icon)
+        .with_tooltip("RustVNC")
+        .build()
+    {
+        Ok(tray) => tray,
+        Err(err) => {
+            eprintln!("tray icon unavailable: {err}");
+            return (None, None);
+        }
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        while let Ok(event) = MenuEvent::receiver().recv() {
+            let action = match event.id().as_ref() {
+                "show" => Some(TrayAction::Show),
+                "quit" => Some(TrayAction::Quit),
+                _ => None,
+            };
+            if let Some(action) = action {
+                if matches!(action, TrayAction::Quit) {
+                    // A hidden eframe window may stop repainting; make sure the
+                    // quit action is processed before the process exits.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                }
+                if tx.send(action).is_err() {
+                    break;
+                }
+                ctx.request_repaint();
+            }
+        }
+    });
+    (Some(tray), Some(rx))
+}
+
+fn make_tray_icon() -> Option<Icon> {
+    let mut rgba = vec![0u8; 16 * 16 * 4];
+    for y in 0..16 {
+        for x in 0..16 {
+            let index = (y * 16 + x) * 4;
+            let inside = (2..14).contains(&x) && (3..13).contains(&y);
+            let key = (4..12).contains(&x) && (6..10).contains(&y);
+            let (r, g, b, a) = if key {
+                (245, 248, 255, 255)
+            } else if inside {
+                (32, 96, 190, 255)
+            } else {
+                (0, 0, 0, 0)
+            };
+            rgba[index..index + 4].copy_from_slice(&[r, g, b, a]);
+        }
+    }
+    Icon::from_rgba(rgba, 16, 16).ok()
 }
 
 #[cfg(target_os = "windows")]

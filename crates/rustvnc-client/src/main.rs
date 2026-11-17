@@ -715,8 +715,18 @@ impl App {
                         ctx.copy_text(text);
                     }
                 }
-                SessionEvent::Stats { fps, rects, bytes } => {
+                SessionEvent::Stats {
+                    fps,
+                    rects,
+                    bytes,
+                    backed_off,
+                } => {
                     self.stats = format!("{fps:.1} fps · {rects} rects · {} KiB", bytes / 1024);
+                    if backed_off {
+                        // Low fps on a static desktop is the controller saving
+                        // work, not a stall.
+                        self.stats.push_str(self.lang.t(" · 静止降频", " · idle"));
+                    }
                 }
                 SessionEvent::Error {
                     code,

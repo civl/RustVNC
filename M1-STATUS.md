@@ -114,7 +114,7 @@ cargo test --workspace
 | 远端光标形状 | ✅ 32bpp 下渲染远端形状（热点+掩码已处理）；16bpp 不请求光标编码，仍用本地指针 | 16bpp 需服务端按 16bpp 发送光标，未验证 |
 | SSH 密码认证（Windows） | 系统 OpenSSH 无 askpass；已明确报错 + 引导密钥 | 可选：换 `russh` 进程内实现 |
 | 多显示器 / HiDPI | 未实现 | M2 |
-| 自适应画质（双环） | 未实现；当前固定帧率 ticker | M2 |
+| 自适应画质 | 快环已做：静止画面自动降到 4 fps（`FramePacer`），一有像素立刻恢复设定帧率，HUD 显示「静止降频」；慢环（按带宽/丢包调画质）仍是 M2 | 慢环 M2 |
 | 渲染后端 | OpenGL(glow)，非 D3D11；无 WARP 回退 | M2 |
 | 真机 E2E CI | 需要自托管 Mac runner | M6 |
 

@@ -104,6 +104,9 @@ pub enum SessionEvent {
         fps: f64,
         rects: u64,
         bytes: u64,
+        /// True while the request cadence is backed off because the screen is
+        /// static (the HUD shows it so a low fps is not mistaken for a problem).
+        backed_off: bool,
     },
     Error {
         code: SessionErrorCode,
@@ -221,6 +224,57 @@ const STABLE_SESSION: Duration = Duration::from_secs(10);
 /// would silently restore the overlapping-request behaviour this guards against.
 const FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Keeps the request cadence sensible: the configured rate while the screen is
+/// changing, a slow trickle while it is static.
+///
+/// A 5K desktop that never changes still costs the server a full render per
+/// request, so polling it 30 times a second is wasted work on both ends. Any
+/// frame that carried pixels snaps straight back to the active rate, so the
+/// backoff is invisible when the user is actually doing something.
+struct FramePacer {
+    active: Duration,
+    idle: Duration,
+    current: Duration,
+    quiet_frames: u8,
+}
+
+/// Consecutive pixel-less frames before backing off. Three frames is enough to
+/// tell "nothing is happening" from "a single redraw finished".
+const QUIET_FRAMES_BEFORE_BACKOFF: u8 = 3;
+/// Slowest the backoff goes, regardless of how high the configured rate is.
+const MAX_IDLE_INTERVAL: Duration = Duration::from_millis(250);
+
+impl FramePacer {
+    fn new(fps: u32) -> Self {
+        let active = Duration::from_millis(1000 / u64::from(fps.max(1)));
+        Self {
+            active,
+            idle: active.max(MAX_IDLE_INTERVAL),
+            current: active,
+            quiet_frames: 0,
+        }
+    }
+
+    fn on_frame(&mut self, had_content: bool) {
+        if had_content {
+            self.quiet_frames = 0;
+            self.current = self.active;
+            return;
+        }
+        self.quiet_frames = self.quiet_frames.saturating_add(1);
+        if self.quiet_frames >= QUIET_FRAMES_BEFORE_BACKOFF {
+            self.current = self.idle;
+        }
+    }
+
+    fn delay(&self) -> Duration {
+        self.current
+    }
+
+    fn is_backed_off(&self) -> bool {
+        self.current > self.active
+    }
+}
 async fn run_session(
     target: String,
     config: ClientConfig,
@@ -384,14 +438,16 @@ async fn connect_and_loop(
     let mut frames = 0u64;
     let mut last_frames = 0u64;
     let mut last_stats = Instant::now();
-    let interval = Duration::from_millis(1000 / u64::from(config.fps().max(1)));
+    let mut pacer = FramePacer::new(config.fps());
     // Exactly one FramebufferUpdateRequest may be outstanding: sending the next
     // one while the previous update is still streaming makes the server interleave
     // updates, which shows up as tearing / jelly while windows move.
     let mut update_in_flight = false;
     let mut in_flight_since = Instant::now();
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Whether the frame currently being decoded carried any pixels; used to
+    // decide between the active and the idle cadence.
+    let mut frame_had_content = false;
+    let mut next_request = tokio::time::Instant::now();
 
     let _ = events.send(SessionEvent::Connected {
         name: client.server_name().to_string(),
@@ -430,16 +486,20 @@ async fn connect_and_loop(
                             let _ = events.send(SessionEvent::Resized { width, height });
                         }
                         VncEvent::RawImage(rect, data) => {
+                            frame_had_content = true;
                             rects += 1;
                             bytes += data.len() as u64;
                             let _ = events.send(SessionEvent::RawImage { rect, data });
                         }
                         VncEvent::Copy(dst, src) => {
+                            frame_had_content = true;
                             rects += 1;
                             let _ = events.send(SessionEvent::Copy { dst, src });
                         }
                         VncEvent::UpdateComplete => {
                             update_in_flight = false;
+                            pacer.on_frame(frame_had_content);
+                            frame_had_content = false;
                             frames += 1;
                             let _ = events.send(SessionEvent::FrameComplete);
                         }
@@ -512,13 +572,14 @@ async fn connect_and_loop(
                     }
                 }
             }
-            _ = ticker.tick() => {
+            _ = tokio::time::sleep_until(next_request) => {
                 // A lost update must not stall the session forever: after a few
                 // intervals without the marker, re-arm and try again.
                 if update_in_flight && in_flight_since.elapsed() > FRAME_TIMEOUT {
                     tracing::debug!("frame did not complete in time; re-arming refresh");
                     update_in_flight = false;
                 }
+                next_request = tokio::time::Instant::now() + pacer.delay();
                 if !update_in_flight {
                     update_in_flight = true;
                     in_flight_since = Instant::now();
@@ -535,7 +596,12 @@ async fn connect_and_loop(
                 if last_stats.elapsed() >= Duration::from_secs(1) {
                     let elapsed = last_stats.elapsed().as_secs_f64().max(0.001);
                     let fps = (frames - last_frames) as f64 / elapsed;
-                    let _ = events.send(SessionEvent::Stats { fps, rects, bytes });
+                    let _ = events.send(SessionEvent::Stats {
+                        fps,
+                        rects,
+                        bytes,
+                        backed_off: pacer.is_backed_off(),
+                    });
                     last_stats = Instant::now();
                     last_frames = frames;
                 }

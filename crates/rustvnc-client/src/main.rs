@@ -781,8 +781,20 @@ impl App {
                     rects,
                     bytes,
                     backed_off,
+                    latency_ms,
+                    adaptive_interval_ms,
+                    degraded,
                 } => {
                     self.stats = format!("{fps:.1} fps · {rects} rects · {} KiB", bytes / 1024);
+                    if latency_ms > 0.0 {
+                        self.stats.push_str(&format!(" · {latency_ms:.0}ms"));
+                    }
+                    if degraded {
+                        self.stats.push_str(&format!(
+                            " · {} {adaptive_interval_ms}ms",
+                            self.lang.t("自适应降频", "adaptive")
+                        ));
+                    }
                     if backed_off {
                         // Low fps on a static desktop is the controller saving
                         // work, not a stall.
@@ -1059,6 +1071,16 @@ impl App {
                             }
                         }
                     });
+                ui.end_row();
+
+                ui.label(lang.t("自适应帧率", "Adaptive rate"));
+                ui.checkbox(
+                    &mut self.draft.config.adaptive,
+                    lang.t(
+                        "按延迟自动降/升（关闭=锁定画质档帧率）",
+                        "Scale requests with latency (off = fixed quality rate)",
+                    ),
+                );
                 ui.end_row();
 
                 ui.label(lang.t("远端分辨率", "Remote resolution"));

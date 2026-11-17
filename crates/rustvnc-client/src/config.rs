@@ -257,6 +257,10 @@ pub struct ClientConfig {
     /// Opt-in display-mode request applied at session start through the agent.
     #[serde(default)]
     pub resolution: ResolutionPreset,
+    /// Adapt the request rate to measured frame latency (M2b). When false, the
+    /// configured quality frame rate is used except for static-screen backoff.
+    #[serde(default = "default_true")]
+    pub adaptive: bool,
     /// Windows modifier keys -> macOS modifiers.
     #[serde(default)]
     pub key_mapping: KeyMapping,
@@ -287,6 +291,7 @@ impl Default for ClientConfig {
             custom_fps: default_custom_fps(),
             encoding: EncodingPreference::Zrle,
             resolution: ResolutionPreset::Native,
+            adaptive: true,
             key_mapping: KeyMapping::standard(),
             apple_encodings: false,
             agent: AgentConfig::default(),
@@ -298,6 +303,10 @@ impl Default for ClientConfig {
 
 fn default_custom_fps() -> u32 {
     30
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl ClientConfig {
@@ -379,6 +388,14 @@ mod tests {
         config.apply_preset(QualityPreset::Ultra);
         assert_eq!(config.bpp, 32);
         assert_eq!(config.pixel_format().bits_per_pixel, 32);
+    }
+
+    #[test]
+    fn adaptive_defaults_on_and_can_be_disabled() {
+        let mut config = ClientConfig::default();
+        assert!(config.adaptive);
+        config.adaptive = false;
+        assert!(!config.adaptive);
     }
 
     #[test]

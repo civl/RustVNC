@@ -849,6 +849,8 @@ macOS 系统音频 ──► ScreenCaptureKit（macOS 13+）
 
 #### M2 · Windows 原生体验（5 周）
 
+> **状态（2026-11-17）**：已启动。M2b 自适应请求控制器（延迟 EMA、双阈值滞回、HUD、开关）已实现；M2a/M2c/M2d/M2e 见 [M2-PLAN.md](M2-PLAN.md)。
+
 **目标**：从"能跑"到"好用"，达到可发布质量。
 
 工作项：

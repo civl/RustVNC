@@ -107,6 +107,12 @@ pub enum SessionEvent {
         /// True while the request cadence is backed off because the screen is
         /// static (the HUD shows it so a low fps is not mistaken for a problem).
         backed_off: bool,
+        /// Measured request → fully-decoded-frame latency.
+        latency_ms: f64,
+        /// Current request interval after adaptive pacing.
+        adaptive_interval_ms: u64,
+        /// True when the controller has slowed down because latency is high.
+        degraded: bool,
     },
     Error {
         code: SessionErrorCode,
@@ -232,10 +238,15 @@ const FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 /// frame that carried pixels snaps straight back to the active rate, so the
 /// backoff is invisible when the user is actually doing something.
 struct FramePacer {
-    active: Duration,
+    base: Duration,
     idle: Duration,
     current: Duration,
     quiet_frames: u8,
+    adaptive: bool,
+    adaptive_interval: Duration,
+    latency_ema: Option<Duration>,
+    high_streak: u8,
+    low_streak: u8,
 }
 
 /// Consecutive pixel-less frames before backing off. Three frames is enough to
@@ -243,27 +254,81 @@ struct FramePacer {
 const QUIET_FRAMES_BEFORE_BACKOFF: u8 = 3;
 /// Slowest the backoff goes, regardless of how high the configured rate is.
 const MAX_IDLE_INTERVAL: Duration = Duration::from_millis(250);
+/// Sustained latency above this reduces the request rate.
+const HIGH_LATENCY: Duration = Duration::from_millis(200);
+/// Sustained latency below this restores it.
+const LOW_LATENCY: Duration = Duration::from_millis(80);
+/// Hard ceiling for adaptive slowdown (still yields 2 fps).
+const MAX_ADAPTIVE_INTERVAL: Duration = Duration::from_millis(500);
+/// Frames above/below the threshold before acting; hysteresis keeps the
+/// controller from oscillating around a single boundary.
+const HIGH_STREAK: u8 = 3;
+const LOW_STREAK: u8 = 60;
 
 impl FramePacer {
-    fn new(fps: u32) -> Self {
-        let active = Duration::from_millis(1000 / u64::from(fps.max(1)));
+    fn new(fps: u32, adaptive: bool) -> Self {
+        let base = Duration::from_millis(1000 / u64::from(fps.max(1)));
         Self {
-            active,
-            idle: active.max(MAX_IDLE_INTERVAL),
-            current: active,
+            base,
+            idle: base.max(MAX_IDLE_INTERVAL),
+            current: base,
             quiet_frames: 0,
+            adaptive,
+            adaptive_interval: base,
+            latency_ema: None,
+            high_streak: 0,
+            low_streak: 0,
         }
     }
 
-    fn on_frame(&mut self, had_content: bool) {
+    fn on_frame(&mut self, had_content: bool, latency: Duration) {
+        self.observe_latency(latency);
         if had_content {
             self.quiet_frames = 0;
-            self.current = self.active;
+            self.current = self.adaptive_interval.max(self.base);
             return;
         }
         self.quiet_frames = self.quiet_frames.saturating_add(1);
         if self.quiet_frames >= QUIET_FRAMES_BEFORE_BACKOFF {
-            self.current = self.idle;
+            self.current = self.idle.max(self.adaptive_interval);
+        }
+    }
+
+    fn observe_latency(&mut self, latency: Duration) {
+        let ema = match self.latency_ema {
+            Some(previous) => previous.mul_f64(0.8) + latency.mul_f64(0.2),
+            None => latency,
+        };
+        self.latency_ema = Some(ema);
+        if !self.adaptive {
+            return;
+        }
+        if ema >= HIGH_LATENCY {
+            self.low_streak = 0;
+            self.high_streak = self.high_streak.saturating_add(1);
+            if self.high_streak >= HIGH_STREAK {
+                let next = self
+                    .adaptive_interval
+                    .mul_f64(1.25)
+                    .min(MAX_ADAPTIVE_INTERVAL);
+                if next > self.adaptive_interval {
+                    self.adaptive_interval = next.max(self.base);
+                }
+                self.high_streak = 0;
+            }
+        } else if ema <= LOW_LATENCY {
+            self.high_streak = 0;
+            self.low_streak = self.low_streak.saturating_add(1);
+            if self.low_streak >= LOW_STREAK {
+                let next = self.adaptive_interval.mul_f64(0.9).max(self.base);
+                if next < self.adaptive_interval {
+                    self.adaptive_interval = next;
+                }
+                self.low_streak = 0;
+            }
+        } else {
+            self.high_streak = 0;
+            self.low_streak = 0;
         }
     }
 
@@ -271,8 +336,20 @@ impl FramePacer {
         self.current
     }
 
+    fn latency(&self) -> Option<Duration> {
+        self.latency_ema
+    }
+
+    fn adaptive_interval(&self) -> Duration {
+        self.adaptive_interval
+    }
+
+    fn is_degraded(&self) -> bool {
+        self.adaptive_interval > self.base
+    }
+
     fn is_backed_off(&self) -> bool {
-        self.current > self.active
+        self.current > self.base
     }
 }
 async fn run_session(
@@ -438,7 +515,7 @@ async fn connect_and_loop(
     let mut frames = 0u64;
     let mut last_frames = 0u64;
     let mut last_stats = Instant::now();
-    let mut pacer = FramePacer::new(config.fps());
+    let mut pacer = FramePacer::new(config.fps(), config.adaptive);
     // Exactly one FramebufferUpdateRequest may be outstanding: sending the next
     // one while the previous update is still streaming makes the server interleave
     // updates, which shows up as tearing / jelly while windows move.
@@ -498,7 +575,7 @@ async fn connect_and_loop(
                         }
                         VncEvent::UpdateComplete => {
                             update_in_flight = false;
-                            pacer.on_frame(frame_had_content);
+                            pacer.on_frame(frame_had_content, in_flight_since.elapsed());
                             frame_had_content = false;
                             frames += 1;
                             let _ = events.send(SessionEvent::FrameComplete);
@@ -601,6 +678,12 @@ async fn connect_and_loop(
                         rects,
                         bytes,
                         backed_off: pacer.is_backed_off(),
+                        latency_ms: pacer
+                            .latency()
+                            .map(|latency| latency.as_secs_f64() * 1000.0)
+                            .unwrap_or(0.0),
+                        adaptive_interval_ms: pacer.adaptive_interval().as_millis() as u64,
+                        degraded: pacer.is_degraded(),
                     });
                     last_stats = Instant::now();
                     last_frames = frames;
@@ -681,5 +764,56 @@ impl SessionFailure {
             }
             _ => Self::new(SessionErrorCode::Internal, err.to_string(), false),
         }
+    }
+}
+
+#[cfg(test)]
+mod pacer_tests {
+    use super::*;
+
+    #[test]
+    fn high_latency_backs_off_and_low_latency_recovers() {
+        let mut pacer = FramePacer::new(30, true);
+        let base = pacer.delay();
+        for _ in 0..6 {
+            pacer.on_frame(true, Duration::from_millis(400));
+        }
+        assert!(pacer.delay() > base, "high latency must slow requests");
+        assert!(pacer.is_degraded());
+
+        for _ in 0..600 {
+            pacer.on_frame(true, Duration::from_millis(20));
+        }
+        assert_eq!(pacer.delay(), base, "sustained low latency must recover");
+        assert!(!pacer.is_degraded());
+    }
+
+    #[test]
+    fn hysteresis_does_not_oscillate_near_the_threshold() {
+        let mut pacer = FramePacer::new(30, true);
+        // Repeatedly hover between the low and high thresholds.
+        for _ in 0..120 {
+            pacer.on_frame(true, Duration::from_millis(120));
+        }
+        assert_eq!(pacer.delay(), Duration::from_millis(33));
+    }
+
+    #[test]
+    fn disabling_adaptive_keeps_the_configured_rate() {
+        let mut pacer = FramePacer::new(30, false);
+        for _ in 0..120 {
+            pacer.on_frame(true, Duration::from_millis(1000));
+        }
+        assert_eq!(pacer.delay(), Duration::from_millis(33));
+        assert!(!pacer.is_degraded());
+    }
+
+    #[test]
+    fn static_frames_still_use_the_idle_cadence() {
+        let mut pacer = FramePacer::new(30, true);
+        for _ in 0..QUIET_FRAMES_BEFORE_BACKOFF {
+            pacer.on_frame(false, Duration::from_millis(20));
+        }
+        assert_eq!(pacer.delay(), MAX_IDLE_INTERVAL);
     }
 }

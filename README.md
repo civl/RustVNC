@@ -19,6 +19,7 @@ Windows 客户端 ── RFB/SSH (5900) ──────────► macOS 
 - [A0 骨架说明](README-A0.md) · [A1 控制面](README-A1.md) · [A2 菜单栏与剪贴板](README-A2.md) · [A2b 音频](README-A2B.md)
 - [M0 兼容性报告](M0-COMPATIBILITY.md)
 - [M1 / M1b 客户端状态报告](M1-STATUS.md)
+- [M2 执行计划](M2-PLAN.md)
 - [卡点分析与修复计划](BLOCKER-ANALYSIS.md)
 - [验收清单（真机）](ACCEPTANCE.md)
 

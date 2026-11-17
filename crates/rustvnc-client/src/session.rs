@@ -796,6 +796,11 @@ impl SessionFailure {
             VncError::ClientNotRunning => {
                 Self::new(SessionErrorCode::Network, err.to_string(), true)
             }
+            VncError::General(message)
+                if message.contains("Channel closed") || message.contains("channel closed") =>
+            {
+                Self::new(SessionErrorCode::Network, message, true)
+            }
             _ => Self::new(SessionErrorCode::Internal, err.to_string(), false),
         }
     }

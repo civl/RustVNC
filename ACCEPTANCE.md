@@ -22,6 +22,30 @@ Apple 编码    ✅ 1107/1109/1110 各一次；1109=com.apple.keylayout.ABC，11
 端口 22/8443  ❌ 未开放 → SSH 隧道与 Agent 通道在这台机器上无法实测
 ```
 
+### Agent 通道（8443 开放后补测，2026-11-17）
+
+用 `cargo run -p rustvnc-agent-client --example agent_probe` 对真机 Agent 实测，
+期间在 Mac 上放音乐并复制文字：
+
+```text
+PAIRED   声明指纹 36a4f6bd… == 出示指纹 36a4f6bd…
+CONNECTED agent=RustVNC Agent 0.1.0 capabilities=0x1
+CLIPBOARD from agent: 9 bytes            ← Mac ⌘C → Windows 收到
+AUDIO started
+audio datagram datagrams=1   bytes=10    ← 静音时 10 字节/包
+audio datagram datagrams=51  bytes=150   ← 放音乐时 130–230 字节/包
+audio datagram datagrams=301 bytes=168   ← 稳定 50 包/秒（20 ms 帧）
+```
+
+结论：系统音频（Core Audio Tap → Opus → QUIC datagram → WASAPI）与 Mac→Windows
+剪贴板全链路打通。过程中修掉两个只有真机会暴露的问题（Agent 证书只签 loopback
+名字 → 改精确指纹固定；音频启动阻塞 ServerHello → 改有界等待），详见
+`BLOCKER-ANALYSIS.md`。
+
+> 唯一残留告警：连接建立时 `quinn_udp: sendmsg error 10040`（一次 1326 字节的包被
+> Windows 拒绝，QUIC 自动重传后恢复）。疑似 Tailscale 路径的 UDP 消息大小限制，
+> 不影响功能，记为观察项。
+
 > `STATS` 里的 `bytes` 是**解码后**字节数，不是网络流量。测带宽要用抓包或系统计数器。
 >
 > 测试时该 Mac 处于**锁屏**（画面里能看到 macOS 的「你的屏幕正在被观察」提示），

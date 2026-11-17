@@ -20,6 +20,14 @@ use rustvnc_agent_client::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // RUST_LOG=rustvnc_agent_client=debug surfaces datagram/decode diagnostics.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .try_init();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let addr = args
         .first()
@@ -105,7 +113,9 @@ async fn main() -> Result<()> {
         audio,
     })?;
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+    let started = std::time::Instant::now();
+    let deadline = started + Duration::from_secs(seconds);
+    let mut last_beat = 0u64;
     let mut sent_clipboard = false;
     let mut connected = false;
     while std::time::Instant::now() < deadline {
@@ -130,6 +140,11 @@ async fn main() -> Result<()> {
         if connected && !sent_clipboard {
             session.send_clipboard("rustvnc-agent-probe".to_string());
             sent_clipboard = true;
+        }
+        let elapsed = started.elapsed().as_secs();
+        if elapsed >= last_beat + 10 {
+            last_beat = elapsed;
+            println!("… {elapsed}s connected={connected}");
         }
         std::thread::sleep(Duration::from_millis(100));
     }

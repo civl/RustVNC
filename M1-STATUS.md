@@ -40,8 +40,8 @@
 | 连接 CRUD / 搜索 / 导入导出 | ✅ |
 | 凭据保存 / 不保存 | ✅ Keychain/Credential Manager + 内存回退 |
 | 5 档画质 + 自定义 | ✅（切换需重连） |
-| 剪贴板（macOS 方向） | ✅ 走 Agent 通道；纯 RFB 对 macOS **无效**（协议里就没有） |
-| 系统音频 | ✅ Agent → Opus → WASAPI（本机实测出声）；该 Mac 的 8443 未开放，真机音频待装 Agent |
+| 剪贴板（macOS 方向） | ✅ 真机验证：Mac 上复制 → Windows 收到（纯 RFB 对 macOS 无效，协议里就没有） |
+| 系统音频 | ✅ 真机验证：Mac 播放音乐 → 50 包/秒 Opus → Windows WASAPI 出声 |
 
 **判定：功能面完成，真机出画/fps 已验证**；输入与时延、30 分钟稳定性按 ACCEPTANCE.md 自测即可闭环。
 

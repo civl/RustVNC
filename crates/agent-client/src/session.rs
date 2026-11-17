@@ -445,6 +445,7 @@ async fn connect_and_run(
         None
     };
 
+    let mut datagrams = 0u64;
     let mut ticker = tokio::time::interval(KEEPALIVE);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -478,6 +479,10 @@ async fn connect_and_run(
             datagram = connection.read_datagram(), if audio.is_some() => {
                 match datagram {
                     Ok(bytes) => {
+                        datagrams += 1;
+                        if datagrams % 50 == 1 {
+                            tracing::debug!(datagrams, bytes = bytes.len(), "audio datagram");
+                        }
                         if let Some(path) = audio.as_mut() {
                             path.handle(&bytes, events);
                         }

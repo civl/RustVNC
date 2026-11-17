@@ -9,6 +9,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A workflow-file mistake does not fail a step: GitHub rejects the whole file
+  # before any job runs, so the pipeline silently stops reporting. Lint them
+  # explicitly (this is what caught `secrets` being used inside `if:`).
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint workflow files
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
+
   # The agent package is macOS-only (objc2 / Core Audio), so the whole workspace
   # only builds here. The Windows jobs are scoped to the packages that compile
   # there.
@@ -27,6 +39,18 @@ jobs:
         run: cargo test --workspace
       - name: Release build
         run: cargo build --workspace --release
+      - name: Check script permissions
+        # A shell script committed without the executable bit only fails later,
+        # inside the signing/notarization path, where it is expensive to debug.
+        run: |
+          status=0
+          for script in scripts/*.sh; do
+            if [ ! -x "$script" ]; then
+              echo "::error file=$script::not executable (git update-index --chmod=+x $script)"
+              status=1
+            fi
+          done
+          exit $status
       - name: Build agent bundle (ad-hoc)
         # Catches broken Info.plist / LaunchAgent plist / codesign layout without
         # needing a Developer ID in CI.
@@ -42,23 +66,26 @@ jobs:
 
   windows-installer:
     runs-on: windows-latest
+    # `secrets.*` is not allowed inside `if:` expressions (GitHub rejects the
+    # whole workflow file); map the secrets to env and test those instead.
+    env:
+      WINDOWS_SIGN_CERT_BASE64: ${{ secrets.WINDOWS_SIGN_CERT_BASE64 }}
+      WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Materialise signing certificate
-        # Optional: without the secret the installer is built unsigned and the
-        # step below says so instead of failing the build.
-        if: ${{ secrets.RUSTVNC_SIGN_CERT_BASE64 != '' }}
+        # Optional: without the secret the installer is built unsigned and
+        # `sign.ps1` says so instead of failing the build.
+        if: env.WINDOWS_SIGN_CERT_BASE64 != ''
         shell: pwsh
-        env:
-          PFX_BASE64: ${{ secrets.RUSTVNC_SIGN_CERT_BASE64 }}
         run: |
           $path = Join-Path $env:RUNNER_TEMP "codesign.pfx"
-          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:PFX_BASE64))
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:WINDOWS_SIGN_CERT_BASE64))
           "RUSTVNC_SIGN_CERT=$path" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "RUSTVNC_SIGN_PASSWORD=${{ secrets.RUSTVNC_SIGN_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RUSTVNC_SIGN_PASSWORD=$env:WINDOWS_SIGN_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Append
           "RUSTVNC_REQUIRE_SIGN=1" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Build installer
         run: powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1

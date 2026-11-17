@@ -59,6 +59,67 @@ impl EncodingPreference {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModifierTarget {
+    Control,
+    Command,
+    Option,
+    None,
+}
+
+impl ModifierTarget {
+    pub const ALL: [Self; 4] = [Self::Control, Self::Command, Self::Option, Self::None];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Control => "⌃ Control",
+            Self::Command => "⌘ Command",
+            Self::Option => "⌥ Option",
+            Self::None => "不发送",
+        }
+    }
+}
+
+/// Maps Windows modifier keys onto the modifiers sent to macOS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyMapping {
+    pub ctrl: ModifierTarget,
+    pub alt: ModifierTarget,
+    pub win: ModifierTarget,
+}
+
+impl Default for KeyMapping {
+    fn default() -> Self {
+        Self::standard()
+    }
+}
+
+impl KeyMapping {
+    pub fn standard() -> Self {
+        Self {
+            ctrl: ModifierTarget::Control,
+            alt: ModifierTarget::Option,
+            win: ModifierTarget::Command,
+        }
+    }
+
+    pub fn windows_style() -> Self {
+        Self {
+            ctrl: ModifierTarget::Command,
+            alt: ModifierTarget::Option,
+            win: ModifierTarget::Control,
+        }
+    }
+
+    pub fn is_standard(&self) -> bool {
+        *self == Self::standard()
+    }
+
+    pub fn is_windows_style(&self) -> bool {
+        *self == Self::windows_style()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ResolutionPreset {
     #[default]
@@ -196,6 +257,9 @@ pub struct ClientConfig {
     /// Opt-in display-mode request applied at session start through the agent.
     #[serde(default)]
     pub resolution: ResolutionPreset,
+    /// Windows modifier keys -> macOS modifiers.
+    #[serde(default)]
+    pub key_mapping: KeyMapping,
     /// Advertise Apple's private pseudo-encodings (1104/1105/1107/1109/1110).
     ///
     /// They are parsed safely (length-prefixed skip) but off by default: their
@@ -223,6 +287,7 @@ impl Default for ClientConfig {
             custom_fps: default_custom_fps(),
             encoding: EncodingPreference::Zrle,
             resolution: ResolutionPreset::Native,
+            key_mapping: KeyMapping::standard(),
             apple_encodings: false,
             agent: AgentConfig::default(),
             security: SecurityMode::Direct,

@@ -7,7 +7,8 @@ use rustvnc_agent_client::{
     AgentEvent, AgentSession, PairConfig, SessionConfig as AgentSessionConfig, pair,
 };
 use rustvnc_client::config::{
-    AuthMode, ClientConfig, EncodingPreference, QualityPreset, ResolutionPreset, SecurityMode,
+    AuthMode, ClientConfig, EncodingPreference, KeyMapping, ModifierTarget, QualityPreset,
+    ResolutionPreset, SecurityMode,
 };
 use rustvnc_client::credentials::CredentialStore;
 use rustvnc_client::input::{key_to_keysym, text_to_keysyms};
@@ -172,6 +173,8 @@ struct App {
     agent_status: String,
     pending_resolution: Option<(u16, u16)>,
     agent_pair_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// Floating key-mapping editor.
+    show_keymap: bool,
 }
 
 /// The four modifiers RFB can express, as remote state rather than per-event
@@ -188,13 +191,29 @@ struct ModifierState {
 }
 
 impl ModifierState {
-    fn from_egui(modifiers: egui::Modifiers) -> Self {
-        Self {
+    fn from_egui(modifiers: egui::Modifiers, mapping: &KeyMapping) -> Self {
+        let mut state = Self {
             shift: modifiers.shift,
-            ctrl: modifiers.ctrl,
-            alt: modifiers.alt,
-            command: modifiers.mac_cmd,
+            ..Self::default()
+        };
+        let mut apply = |target: ModifierTarget| match target {
+            ModifierTarget::Control => state.ctrl = true,
+            ModifierTarget::Command => state.command = true,
+            ModifierTarget::Option => state.alt = true,
+            ModifierTarget::None => {}
+        };
+        if modifiers.ctrl {
+            apply(mapping.ctrl);
         }
+        if modifiers.alt {
+            apply(mapping.alt);
+        }
+        // egui exposes macOS Command as `mac_cmd`; on Windows the Win key is
+        // polled directly because egui-winit does not put it in `Modifiers`.
+        if modifiers.mac_cmd || win_key_down() {
+            apply(mapping.win);
+        }
+        state
     }
 
     /// (keysym, down) transitions that turn `from` into `to`, in send order.
@@ -298,6 +317,7 @@ impl App {
             agent_status: String::new(),
             pending_resolution: None,
             agent_pair_rx: None,
+            show_keymap: false,
         }
     }
 
@@ -1251,6 +1271,12 @@ impl App {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
+        if self.show_keymap {
+            if self.session.is_some() {
+                self.sync_modifiers(ModifierState::default());
+            }
+            return;
+        }
         let Some(image_rect) = self.image_rect else {
             return;
         };
@@ -1264,7 +1290,10 @@ impl App {
         // releasing on focus loss also prevents keys getting stuck remotely.
         let focused = ctx.input(|input| input.focused);
         let local_modifiers = if focused {
-            ModifierState::from_egui(ctx.input(|input| input.modifiers))
+            ModifierState::from_egui(
+                ctx.input(|input| input.modifiers),
+                &self.draft.config.key_mapping,
+            )
         } else {
             ModifierState::default()
         };
@@ -1494,6 +1523,68 @@ impl App {
         self.last_local_clipboard = Some(text);
     }
 
+    fn keymap_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_keymap;
+        let mut mapping = self.draft.config.key_mapping.clone();
+        let mut save = false;
+        egui::Window::new("按键映射")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                ui.label("把 Windows 键盘的修饰键映射到 macOS。修改对当前会话立即生效。");
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(mapping.is_standard(), "标准")
+                        .on_hover_text("Ctrl→Control，Alt→Option，Win→Command")
+                        .clicked()
+                    {
+                        mapping = KeyMapping::standard();
+                    }
+                    if ui
+                        .selectable_label(mapping.is_windows_style(), "Windows 习惯")
+                        .on_hover_text("Ctrl→Command，Alt→Option，Win→Control")
+                        .clicked()
+                    {
+                        mapping = KeyMapping::windows_style();
+                    }
+                });
+                ui.separator();
+                egui::Grid::new("keymap-grid")
+                    .num_columns(2)
+                    .spacing([24.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.strong("Windows 按键");
+                        ui.strong("发送到 macOS");
+                        ui.end_row();
+                        keymap_row(ui, "Ctrl", "keymap-ctrl", &mut mapping.ctrl);
+                        keymap_row(ui, "Alt", "keymap-alt", &mut mapping.alt);
+                        keymap_row(ui, "Win / ⌘", "keymap-win", &mut mapping.win);
+                    });
+                ui.add_space(8.0);
+                ui.label(
+                    "提示：Win 键只在 Windows 上通过系统键状态读取；macOS 客户端使用 ⌘。\
+                     文本、功能键和方向键按 macOS 键位发送。",
+                );
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("恢复默认").clicked() {
+                        mapping = KeyMapping::standard();
+                    }
+                    if ui.button("保存配置").clicked() {
+                        save = true;
+                    }
+                });
+            });
+        self.show_keymap = open;
+        self.draft.config.key_mapping = mapping;
+        if save {
+            self.save_profile();
+        }
+    }
+
     fn left_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let lang = self.lang;
         ui.heading("RustVNC");
@@ -1624,6 +1715,10 @@ impl eframe::App for App {
                     ui.separator();
                     ui.label(&self.status);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let keyboard = keyboard_icon(ui, self.lang);
+                        if keyboard.clicked() {
+                            self.show_keymap = !self.show_keymap;
+                        }
                         if ui
                             .button(match self.lang {
                                 Lang::Zh => "EN",
@@ -1695,6 +1790,9 @@ impl eframe::App for App {
             self.fullscreen_hint_ui(ctx);
         }
 
+        if self.show_keymap {
+            self.keymap_window(ctx);
+        }
         self.handle_input(ctx);
         self.sync_clipboard();
         ctx.request_repaint_after(Duration::from_millis(16));
@@ -1773,6 +1871,64 @@ fn cursor_screen_rect(
         origin,
         egui::vec2(f32::from(size.0) * scale, f32::from(size.1) * scale),
     )
+}
+
+fn keyboard_icon(ui: &mut egui::Ui, lang: Lang) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::click());
+    let visuals = ui.style().interact(&response);
+    let painter = ui.painter();
+    painter.rect_filled(rect, 5.0, visuals.weak_bg_fill);
+    painter.rect_stroke(rect, 5.0, visuals.bg_stroke, egui::StrokeKind::Inside);
+    let key_color = visuals.fg_stroke.color.gamma_multiply(0.8);
+    let inner = rect.shrink2(egui::vec2(6.0, 7.0));
+    let gap = 2.0;
+    let key_width = (inner.width() - gap * 2.0) / 3.0;
+    let key_height = (inner.height() - gap) / 2.0;
+    for row in 0..2 {
+        for column in 0..3 {
+            let min = egui::pos2(
+                inner.min.x + column as f32 * (key_width + gap),
+                inner.min.y + row as f32 * (key_height + gap),
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_size(min, egui::vec2(key_width, key_height)),
+                1.5,
+                key_color,
+            );
+        }
+    }
+    response.on_hover_text(lang.t("按键映射", "Key mapping"))
+}
+
+fn keymap_row(ui: &mut egui::Ui, label: &str, id: &str, target: &mut ModifierTarget) {
+    ui.label(label);
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(target.label())
+        .show_ui(ui, |ui| {
+            for option in ModifierTarget::ALL {
+                ui.selectable_value(target, option, option.label());
+            }
+        });
+    ui.end_row();
+}
+
+#[cfg(target_os = "windows")]
+fn win_key_down() -> bool {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetAsyncKeyState(v_key: i32) -> i16;
+    }
+    const VK_LWIN: i32 = 0x5B;
+    const VK_RWIN: i32 = 0x5C;
+    unsafe {
+        (GetAsyncKeyState(VK_LWIN) as u16 & 0x8000) != 0
+            || (GetAsyncKeyState(VK_RWIN) as u16 & 0x8000) != 0
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn win_key_down() -> bool {
+    false
 }
 
 fn is_special_key(key: egui::Key) -> bool {
@@ -1978,7 +2134,7 @@ mod tests {
             command: true,
             ..Default::default()
         };
-        let state = ModifierState::from_egui(modifiers);
+        let state = ModifierState::from_egui(modifiers, &KeyMapping::standard());
         assert!(state.ctrl);
         assert!(!state.command, "Ctrl must not become Command");
         assert_eq!(
@@ -1993,11 +2149,32 @@ mod tests {
             mac_cmd: true,
             ..Default::default()
         };
-        let state = ModifierState::from_egui(modifiers);
+        let state = ModifierState::from_egui(modifiers, &KeyMapping::standard());
         assert_eq!(
             ModifierState::transitions(ModifierState::default(), state),
             vec![(0xffeb, true)]
         );
+    }
+
+    #[test]
+    fn windows_style_swaps_ctrl_and_win() {
+        let mapping = KeyMapping::windows_style();
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        let state = ModifierState::from_egui(ctrl, &mapping);
+        assert!(state.command, "Ctrl should become Command");
+        assert!(!state.ctrl, "Ctrl must not stay Control");
+
+        let win = egui::Modifiers {
+            mac_cmd: true,
+            ..Default::default()
+        };
+        let state = ModifierState::from_egui(win, &mapping);
+        assert!(state.ctrl, "Win should become Control");
+        assert!(!state.command, "Win must not stay Command");
     }
 
     #[test]

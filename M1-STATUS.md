@@ -54,7 +54,7 @@
 - **统一错误码**：`AUTH` / `NETWORK` / `PROTOCOL` / `CONFIG` / `SSH` / `INTERNAL`。
 - **诊断日志**：stderr + 每日滚动文件；诊断包导出（不含密码）。
 - **局部纹理更新**：Raw/CopyRect 只上传变化区域。
-- **输入**：修饰键状态机 + 物理键位 + 按键重复 + 特殊键菜单（⌘Tab / ⌘Space / ⌃⌘Q / ⌘⌥Esc …）。
+- **输入**：修饰键状态机 + 物理键位 + 按键重复 + 特殊键菜单；右上角键盘图标可配置 Windows→macOS 修饰键映射（Ctrl/Alt/Win）。
 - **剪贴板**：本地 → RFB `ClientCutText`（第三方服务端）**和** Agent 通道（macOS）；
   Agent 发来的文本会写回本地并去重，避免回环。
 - **音频**：Agent 数据报 → Opus 解码 → 48 kHz 立体声 WASAPI；先攒 60 ms 再播放，欠载输出静音。

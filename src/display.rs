@@ -301,6 +301,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "changes the display configuration; run manually on a real Mac"]
     fn applies_the_current_mode_and_restores_it() {
         let display = CGDisplay::main();
         let current = display.display_mode().expect("current mode");

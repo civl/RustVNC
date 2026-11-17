@@ -111,6 +111,9 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 | 按住 `Shift` 点选多个文件 | 多选生效（修饰键未在点击时丢失） |
 | 按住 `Ctrl` 点击 | 右键菜单（Control-click）出现 |
 | 长按方向键 | 连续移动（按键重复生效） |
+| `F11` | 窗口全屏 ↔ 还原；**不会**被转发到 Mac（Mac 侧不会收到 F11） |
+| 全屏状态下指针/键盘 | 仍然精确映射到远端（等比缩放 + 居中留边） |
+| 全屏中点「断开」 | 窗口自动退回带边框的普通窗口 |
 
 - [ ] 全部符合；若 `Ctrl` 出现 ⌘ 行为，说明修饰键状态机回归了
 

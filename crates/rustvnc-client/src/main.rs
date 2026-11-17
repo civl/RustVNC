@@ -94,6 +94,10 @@ struct App {
     /// client can send real transitions instead of re-deriving them per key,
     /// which is what makes Ctrl+click and Shift+drag work.
     sent_modifiers: ModifierState,
+    /// Fullscreen hides the chrome and lets the remote image fill the screen.
+    fullscreen: bool,
+    /// When to stop showing the "press F11 to exit" hint.
+    fullscreen_hint: Option<Instant>,
     /// Host key fetched for the current form, waiting for the user to compare
     /// the fingerprint and pin it.
     host_key_probe: Option<HostKeyProbe>,
@@ -220,6 +224,8 @@ impl App {
             last_remote_clipboard: None,
             last_clipboard_poll: Instant::now(),
             sent_modifiers: ModifierState::default(),
+            fullscreen: false,
+            fullscreen_hint: None,
             host_key_probe: None,
             info: None,
             agent: None,
@@ -516,7 +522,49 @@ impl App {
         });
     }
 
+    /// Brief overlay explaining how to leave immersive mode; it would otherwise
+    /// be impossible to guess that F11 comes back.
+    fn fullscreen_hint_ui(&mut self, ctx: &egui::Context) {
+        let Some(until) = self.fullscreen_hint else {
+            return;
+        };
+        if Instant::now() >= until {
+            self.fullscreen_hint = None;
+            return;
+        }
+        let text = self
+            .lang
+            .t("全屏中 · 按 F11 退出", "Fullscreen · press F11 to exit");
+        egui::Area::new("fullscreen-hint".into())
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 24.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(text);
+                });
+            });
+        ctx.request_repaint_after(Duration::from_millis(250));
+    }
+    /// Toggle immersive mode: hide the chrome and let the remote screen fill
+    /// the display. F11 and the toolbar button both land here.
+    fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
+        if self.session.is_none() {
+            return;
+        }
+        self.fullscreen = !self.fullscreen;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+        self.fullscreen_hint = self
+            .fullscreen
+            .then(|| Instant::now() + Duration::from_secs(3));
+        ctx.request_repaint();
+    }
+
     fn disconnect(&mut self) {
+        // Fullscreen is left by `update` once it sees there is no session; it
+        // owns the context needed to resize the window back.
+        if self.fullscreen {
+            self.fullscreen = false;
+            self.fullscreen_hint = None;
+        }
         // Never leave a modifier held on the remote side.
         self.sync_modifiers(ModifierState::default());
         if let Some(mut session) = self.session.take() {
@@ -646,49 +694,54 @@ impl App {
         self.frame_dirty = false;
     }
 
-    fn session_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn session_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, chrome: bool) {
         let lang = self.lang;
-        ui.horizontal(|ui| {
-            ui.heading(lang.t("远程桌面", "Remote desktop"));
-            ui.separator();
-            ui.label(&self.status);
-            if !self.stats.is_empty() {
-                ui.label(&self.stats);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(lang.t("断开", "Disconnect")).clicked() {
-                    self.disconnect();
+        if chrome {
+            ui.horizontal(|ui| {
+                ui.heading(lang.t("远程桌面", "Remote desktop"));
+                ui.separator();
+                ui.label(&self.status);
+                if !self.stats.is_empty() {
+                    ui.label(&self.stats);
                 }
-                let current = self.draft.config.quality;
-                egui::ComboBox::from_id_salt("session-quality")
-                    .selected_text(current.label())
-                    .show_ui(ui, |ui| {
-                        for quality in QualityPreset::ALL {
-                            if ui
-                                .selectable_value(
-                                    &mut self.draft.config.quality,
-                                    quality,
-                                    quality.label(),
-                                )
-                                .clicked()
-                            {
-                                self.draft.config.apply_preset(quality);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(lang.t("断开", "Disconnect")).clicked() {
+                        self.disconnect();
+                    }
+                    if ui.button(lang.t("全屏 F11", "Fullscreen F11")).clicked() {
+                        self.toggle_fullscreen(ctx);
+                    }
+                    let current = self.draft.config.quality;
+                    egui::ComboBox::from_id_salt("session-quality")
+                        .selected_text(current.label())
+                        .show_ui(ui, |ui| {
+                            for quality in QualityPreset::ALL {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.draft.config.quality,
+                                        quality,
+                                        quality.label(),
+                                    )
+                                    .clicked()
+                                {
+                                    self.draft.config.apply_preset(quality);
+                                }
                             }
-                        }
-                    });
-                ui.label(lang.t("画质（重连生效）", "Quality (reconnect)"));
-                ui.checkbox(&mut self.clipboard_sync, lang.t("剪贴板", "Clipboard"));
-                self.special_keys_menu(ui);
-                if ui.button(lang.t("发送剪贴板", "Send clipboard")).clicked()
-                    && let Ok(mut clipboard) = arboard::Clipboard::new()
-                    && let Ok(text) = clipboard.get_text()
-                    && let Some(session) = &self.session
-                {
-                    session.send_input(X11Event::CopyText(text));
-                }
+                        });
+                    ui.label(lang.t("画质（重连生效）", "Quality (reconnect)"));
+                    ui.checkbox(&mut self.clipboard_sync, lang.t("剪贴板", "Clipboard"));
+                    self.special_keys_menu(ui);
+                    if ui.button(lang.t("发送剪贴板", "Send clipboard")).clicked()
+                        && let Ok(mut clipboard) = arboard::Clipboard::new()
+                        && let Ok(text) = clipboard.get_text()
+                        && let Some(session) = &self.session
+                    {
+                        session.send_input(X11Event::CopyText(text));
+                    }
+                });
             });
-        });
-        ui.separator();
+            ui.separator();
+        }
 
         self.update_texture(ctx);
         let available = ui.available_size();
@@ -700,12 +753,19 @@ impl App {
         };
 
         let size = egui::vec2(self.frame.width as f32, self.frame.height as f32);
-        let scale = (available.x / size.x).min(available.y / size.y).min(1.0);
+        let fit = (available.x / size.x).min(available.y / size.y);
+        // Windowed mode never enlarges the remote screen (it would only blur);
+        // fullscreen fills the display, which is the point of asking for it.
+        let scale = if chrome { fit.min(1.0) } else { fit };
         let display = size * scale;
-        let response = ui.add(
-            egui::Image::new(egui::load::SizedTexture::new(texture.id(), display))
-                .sense(egui::Sense::click_and_drag()),
-        );
+        let image = egui::Image::new(egui::load::SizedTexture::new(texture.id(), display))
+            .sense(egui::Sense::click_and_drag());
+        let response = if chrome {
+            ui.add(image)
+        } else {
+            // Letterbox evenly instead of pinning the frame to the top-left.
+            ui.centered_and_justified(|ui| ui.add(image)).inner
+        };
         if response.clicked() {
             response.request_focus();
         }
@@ -1074,6 +1134,11 @@ impl App {
                         modifiers,
                         ..
                     } => {
+                        // F11 is ours: it toggles fullscreen in `update`, so it
+                        // must not also reach the remote as a key press.
+                        if key == egui::Key::F11 {
+                            continue;
+                        }
                         let physical = physical_key.unwrap_or(key);
                         if is_special_key(key) {
                             // Arrows/Enter/Tab repeat is useful; keep it.
@@ -1331,58 +1396,85 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_session(ctx);
 
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("RustVNC");
-                ui.separator();
-                ui.label(&self.status);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .button(match self.lang {
-                            Lang::Zh => "EN",
-                            Lang::En => "中文",
-                        })
-                        .clicked()
-                    {
-                        self.lang = match self.lang {
-                            Lang::Zh => Lang::En,
-                            Lang::En => Lang::Zh,
-                        };
+        // App-level shortcuts run before input forwarding: otherwise F11 would
+        // be sent to the Mac as well, and fullscreen would toggle the remote.
+        if ctx.input(|input| input.key_pressed(egui::Key::F11)) {
+            self.toggle_fullscreen(ctx);
+        }
+
+        // Immersive mode only makes sense while a session is being displayed.
+        // Disconnecting (or a session that ended on its own) must also restore
+        // the window, or the user is left with an empty fullscreen window.
+        if self.fullscreen && self.session.is_none() {
+            self.fullscreen = false;
+            self.fullscreen_hint = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+        let immersive = self.fullscreen && self.session.is_some();
+
+        if !immersive {
+            egui::TopBottomPanel::top("top").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("RustVNC");
+                    ui.separator();
+                    ui.label(&self.status);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(match self.lang {
+                                Lang::Zh => "EN",
+                                Lang::En => "中文",
+                            })
+                            .clicked()
+                        {
+                            self.lang = match self.lang {
+                                Lang::Zh => Lang::En,
+                                Lang::En => Lang::Zh,
+                            };
+                        }
+                    });
+                });
+            });
+
+            egui::SidePanel::left("profiles")
+                .resizable(true)
+                .default_width(280.0)
+                .show(ctx, |ui| {
+                    self.left_panel(ui, ctx);
+                });
+
+            egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if let Some(error) = &self.error {
+                        ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    } else {
+                        ui.label(&self.status);
+                    }
+                    if self.session.is_some() {
+                        ui.separator();
+                        ui.label(&self.stats);
                     }
                 });
             });
-        });
+        }
 
-        egui::SidePanel::left("profiles")
-            .resizable(true)
-            .default_width(280.0)
-            .show(ctx, |ui| {
-                self.left_panel(ui, ctx);
-            });
-
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
-                } else {
-                    ui.label(&self.status);
-                }
-                if self.session.is_some() {
-                    ui.separator();
-                    ui.label(&self.stats);
-                }
-            });
-        });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let panel = if immersive {
+            egui::CentralPanel::default().frame(egui::Frame::NONE)
+        } else {
+            egui::CentralPanel::default()
+        };
+        panel.show(ctx, |ui| {
             if self.session.is_some() {
-                self.session_ui(ui, ctx);
+                self.session_ui(ui, ctx, !immersive);
             } else {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     self.form_ui(ui);
                 });
             }
         });
+
+        if immersive {
+            self.fullscreen_hint_ui(ctx);
+        }
 
         self.handle_input(ctx);
         self.sync_clipboard();

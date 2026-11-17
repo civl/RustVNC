@@ -23,7 +23,7 @@ jobs:
       APPLE_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
       SIGN_CERT_BASE64: ${{ secrets.MACOS_SIGN_CERT_BASE64 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Import Developer ID certificate
         if: env.SIGN_CERT_BASE64 != ''
@@ -61,7 +61,7 @@ jobs:
           fi
       - name: Package
         run: ditto -c -k --keepParent "dist/RustVNC Agent.app" "dist/rustvnc-agent-${{ github.ref_name }}.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rustvnc-agent-macos
           path: dist/*.zip
@@ -73,7 +73,7 @@ jobs:
       WINDOWS_SIGN_CERT_BASE64: ${{ secrets.WINDOWS_SIGN_CERT_BASE64 }}
       WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
@@ -88,7 +88,7 @@ jobs:
           "RUSTVNC_REQUIRE_SIGN=1" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Build installer
         run: powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rustvnc-windows-installer
           path: packaging/windows/output/*.exe

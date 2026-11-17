@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -17,8 +19,29 @@ use vnc::{ClientKeyEvent, ClientMouseEvent, Rect, X11Event};
 fn main() -> eframe::Result {
     let _log_guard = rustvnc_client::diag::init_tracing();
 
+    // wgpu (D3D12/Vulkan) is the default backend: the OpenGL path does not
+    // present on headless or indirectly attached displays — with the desktop
+    // viewed through RustDesk on a machine without a monitor, every glow window
+    // rendered correctly into its framebuffer and still appeared blank white.
+    // `RUSTVNC_RENDERER=glow` forces the old backend for troubleshooting.
+    let preferred = match std::env::var("RUSTVNC_RENDERER").as_deref() {
+        Ok("glow") => eframe::Renderer::Glow,
+        _ => eframe::Renderer::Wgpu,
+    };
+    match run_native(preferred) {
+        Err(err) if preferred == eframe::Renderer::Wgpu => {
+            tracing::warn!("wgpu renderer unavailable ({err}); falling back to glow/OpenGL");
+            run_native(eframe::Renderer::Glow)
+        }
+        other => other,
+    }
+}
+
+fn run_native(renderer: eframe::Renderer) -> eframe::Result {
+    tracing::info!("starting UI with the {renderer:?} renderer");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1120.0, 720.0]),
+        renderer,
         ..Default::default()
     };
     eframe::run_native(

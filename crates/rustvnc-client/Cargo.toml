@@ -11,7 +11,7 @@ ab_glyph = "0.2"
 anyhow = "1"
 arboard = "3"
 dirs = "7"
-eframe = { version = "0.33", default-features = false, features = ["glow", "default_fonts"] }
+eframe = { version = "0.33", default-features = false, features = ["glow", "wgpu", "default_fonts"] }
 egui = "0.33"
 keyring = "3"
 serde = { version = "1", features = ["derive"] }
@@ -22,6 +22,10 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 vnc-rs = "0.6"
 rustvnc-agent-client = { path = "../agent-client" }
+# Enabling eframe's `wgpu` feature alone is not enough: without this direct dependency
+# naming a backend, wgpu panics at startup with "no backend feature that is
+# implemented for the target platform was enabled".
+wgpu = { version = "27", features = ["dx12"] }
 
 [dev-dependencies]
 env_logger = "0.11"

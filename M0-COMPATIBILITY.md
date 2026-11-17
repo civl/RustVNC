@@ -84,6 +84,18 @@ Wrong password
 | 真机键鼠注入与 P95 | 需人工按 ACCEPTANCE 执行；避免干扰正在使用的 Mac |
 | 10 分钟连续出画 | 已有 90 秒 soak；10 分钟待补 |
 | Apple 1105 字段顺序 | 候选布局已做校验与日志，但真实 1105 字节未抓到（单屏不出）；需移动指针/多屏抓包确认 |
+
+### 抓取 1104/1105 原始体
+
+本机有 BetterDisplay 虚拟屏时，用真实会话抓一次：
+
+```bash
+./scripts/capture-apple.sh
+```
+
+脚本会隐藏输入 macOS 密码，只把 `rfb-probe --apple` 的
+`apple encoding <code>: ... body=... [hex]` 输出写入
+`target/apple-capture/*.txt`，不写密码。拿到 1105 的十六进制后即可确认字段顺序。
 | 多 macOS 版本矩阵 | 当前仅 macOS 27.2 / Apple Silicon；14/15/26、Intel 未测 |
 | Tight/JPEG 质量旋钮 | macOS 不支持，归档为已知差异 |
 | Windows 真机输入/延迟 | 需 Windows 真机 + 凭据 |

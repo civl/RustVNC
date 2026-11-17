@@ -1,0 +1,32 @@
+[package]
+name = "rustvnc-agent-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Windows-side client for the RustVNC macOS agent: QUIC/TLS control plane, clipboard and Opus audio"
+
+[lib]
+name = "rustvnc_agent_client"
+
+[dependencies]
+anyhow = "1"
+dirs = "7"
+bytes = "1"
+cpal = "0.15"
+hex = "0.4"
+opus = "0.4"
+postcard = { version = "1.1", features = ["use-std"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rand = "0.9"
+rcgen = { version = "0.14", features = ["x509-parser"] }
+rtrb = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Deliberately minimal. The agent is not sandboxed, so it needs no sandbox
+      entitlements; the two entries below are the only ones the feature set
+      requires, and every extra entitlement makes notarisation review harder.
+
+      * audio-input: the Core Audio process tap captures system audio. The TCC
+        prompt itself is driven by NSAudioCaptureUsageDescription in
+        Info.plist; this entitlement is what the hardened runtime consults when
+        the process touches Core Audio input.
+      * disable-library-validation is intentionally NOT set: nothing loads
+        unsigned plugins, and leaving it out keeps the library loading rules at
+        their default.
+
+      Screen recording is a TCC permission (no entitlement exists for it).
+    -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

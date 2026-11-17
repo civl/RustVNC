@@ -101,6 +101,10 @@ pub struct SshConfig {
     pub port: u16,
     pub key_path: String,
     pub known_hosts: String,
+    /// Never written to `profiles.json`: filled in from the credential store
+    /// (or the connection form) just before connecting.
+    #[serde(skip)]
+    pub password: String,
 }
 
 impl Default for SshConfig {
@@ -110,6 +114,36 @@ impl Default for SshConfig {
             port: 22,
             key_path: String::new(),
             known_hosts: String::new(),
+            password: String::new(),
+        }
+    }
+}
+
+/// The optional enhanced channel to the macOS agent (clipboard + audio + TLS).
+///
+/// Off by default: the agent is an extra install on the Mac, and the RFB path
+/// works without it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    pub enabled: bool,
+    pub port: u16,
+    pub audio: bool,
+    /// One-time code typed once while pairing; never persisted.
+    #[serde(skip)]
+    pub pair_code: String,
+    /// Fingerprint to compare against when pairing; never persisted.
+    #[serde(skip)]
+    pub fingerprint: String,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 8443,
+            audio: true,
+            pair_code: String::new(),
+            fingerprint: String::new(),
         }
     }
 }
@@ -125,6 +159,15 @@ pub struct ClientConfig {
     pub quality: QualityPreset,
     pub bpp: u8,
     pub encoding: EncodingPreference,
+    /// Advertise Apple's private pseudo-encodings (1104/1105/1107/1109/1110).
+    ///
+    /// They are parsed safely (length-prefixed skip) but off by default: their
+    /// bodies are undocumented, so enabling them is a per-connection experiment
+    /// to be validated against the macOS build in use.
+    #[serde(default)]
+    pub apple_encodings: bool,
+    #[serde(default)]
+    pub agent: AgentConfig,
     pub security: SecurityMode,
     pub ssh: SshConfig,
 }
@@ -141,6 +184,8 @@ impl Default for ClientConfig {
             quality: QualityPreset::High,
             bpp: 32,
             encoding: EncodingPreference::Zrle,
+            apple_encodings: false,
+            agent: AgentConfig::default(),
             security: SecurityMode::Direct,
             ssh: SshConfig::default(),
         }
@@ -177,9 +222,23 @@ impl ClientConfig {
             EncodingPreference::Tight => encodings.push(VncEncoding::Tight),
             EncodingPreference::Raw => {}
         }
+        if self.encoding != EncodingPreference::Raw {
+            // zlib(6) is a separate encoding from ZRLE's internal stream and is
+            // better for large flat/text areas; macOS supports both.
+            encodings.push(VncEncoding::Zlib);
+        }
         encodings.push(VncEncoding::CopyRect);
         encodings.push(VncEncoding::CursorPseudo);
         encodings.push(VncEncoding::DesktopSizePseudo);
+        if self.apple_encodings {
+            encodings.extend([
+                VncEncoding::AppleCursorPseudo,
+                VncEncoding::AppleDisplayPseudo,
+                VncEncoding::AppleCapabilitiesPseudo,
+                VncEncoding::AppleKeyboardPseudo,
+                VncEncoding::AppleMachinePseudo,
+            ]);
+        }
         encodings.push(VncEncoding::Raw);
         encodings
     }

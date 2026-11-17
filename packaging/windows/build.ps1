@@ -6,6 +6,11 @@ try {
     $stage = Join-Path $PSScriptRoot "stage"
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Copy-Item (Join-Path $root "target\release\rustvnc-client.exe") $stage -Force
+
+    # Sign the executable before packaging: the installer embeds it, and the
+    # signature has to survive the install. Opt-in via RUSTVNC_SIGN_CERT.
+    & (Join-Path $PSScriptRoot "sign.ps1") -Path (Join-Path $stage "rustvnc-client.exe") -Description "RustVNC Client"
+
     $iscc = Get-Command "iscc.exe" -ErrorAction SilentlyContinue
     $isccPath = if ($iscc) { $iscc.Source } else { $null }
     if (-not $isccPath) {
@@ -23,6 +28,15 @@ try {
         exit 2
     }
     & $isccPath (Join-Path $PSScriptRoot "rustvnc.iss")
+    if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+    # Sign the installer itself, otherwise SmartScreen blocks the download.
+    $output = Join-Path $PSScriptRoot "output"
+    if (Test-Path $output) {
+        Get-ChildItem $output -Filter "*.exe" | ForEach-Object {
+            & (Join-Path $PSScriptRoot "sign.ps1") -Path $_.FullName -Description "RustVNC Client Installer"
+        }
+    }
     Write-Host "Installer written to packaging\windows\output"
 } finally {
     Pop-Location

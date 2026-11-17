@@ -176,10 +176,16 @@ impl Session {
         let _ = self.commands.send(SessionCommand::Input(event));
     }
 
+    /// Ask the session thread to stop.
+    ///
+    /// This never joins: the worker may still be blocked in a connect or a
+    /// handshake, and joining from the UI thread would freeze the window for as
+    /// long as that network call takes. The handle is detached instead; the
+    /// worker exits on its own once its current await completes or times out.
     pub fn close(&mut self) {
         let _ = self.commands.send(SessionCommand::Close);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            drop(thread);
         }
     }
 }
@@ -190,6 +196,15 @@ impl Drop for Session {
     }
 }
 
+/// How long a TCP connect may take before the attempt is abandoned.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the RFB handshake (version, security, init) may take.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// A session that streamed for at least this long counts as healthy, so the
+/// next failure starts the backoff over. Shorter-lived connections keep
+/// climbing the backoff instead of retrying once per second forever.
+const STABLE_SESSION: Duration = Duration::from_secs(10);
+
 async fn run_session(
     target: String,
     config: ClientConfig,
@@ -199,6 +214,7 @@ async fn run_session(
 ) {
     let mut attempt = 0u32;
     loop {
+        let started = Instant::now();
         match connect_and_loop(
             target.clone(),
             config.clone(),
@@ -213,17 +229,18 @@ async fn run_session(
                 break;
             }
             Err(failure) => {
+                let streamed = started.elapsed();
                 let _ = events.send(SessionEvent::Error {
                     code: failure.code,
                     message: failure.message.clone(),
                     retryable: failure.retryable,
                 });
-                if failure.connected {
-                    attempt = 0;
-                }
                 if !config.auto_reconnect || !failure.retryable {
                     let _ = events.send(SessionEvent::Closed);
                     break;
+                }
+                if failure.connected && streamed >= STABLE_SESSION {
+                    attempt = 0;
                 }
                 attempt = attempt.saturating_add(1);
                 let delay = backoff(attempt);
@@ -272,13 +289,25 @@ async fn connect_and_loop(
         ));
     }
 
-    let tcp = TcpStream::connect(&target).await.map_err(|err| {
-        SessionFailure::new(
-            SessionErrorCode::Network,
-            format!("connect to {target}: {err}"),
-            true,
-        )
-    })?;
+    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target))
+        .await
+        .map_err(|_| {
+            SessionFailure::new(
+                SessionErrorCode::Network,
+                format!(
+                    "connect to {target} timed out after {}s (firewall, wrong port, or host asleep)",
+                    CONNECT_TIMEOUT.as_secs()
+                ),
+                true,
+            )
+        })?
+        .map_err(|err| {
+            SessionFailure::new(
+                SessionErrorCode::Network,
+                format!("connect to {target}: {err}"),
+                true,
+            )
+        })?;
     let mut connector = VncConnector::new(tcp)
         .allow_shared(config.shared)
         .set_pixel_format(config.pixel_format());
@@ -295,26 +324,40 @@ async fn connect_and_loop(
         connector = connector.set_auth_method(async move { Ok(password) });
     }
 
-    let client = connector
-        .build()
-        .map_err(|err| {
-            SessionFailure::new(
-                SessionErrorCode::Config,
-                format!("build RFB connector: {err}"),
-                false,
-            )
-        })?
-        .try_start()
-        .await
-        .map_err(SessionFailure::from_vnc)?
-        .finish()
-        .map_err(|err| {
+    let connector = connector.build().map_err(|err| {
+        SessionFailure::new(
+            SessionErrorCode::Config,
+            format!("build RFB connector: {err}"),
+            false,
+        )
+    })?;
+
+    // The handshake can hang forever if the peer accepts TCP and then stays
+    // silent (wrong port behind a firewall, wedged screensharingd). Bound it.
+    let client = tokio::time::timeout(HANDSHAKE_TIMEOUT, async move {
+        let started = connector
+            .try_start()
+            .await
+            .map_err(SessionFailure::from_vnc)?;
+        started.finish().map_err(|err| {
             SessionFailure::new(
                 SessionErrorCode::Config,
                 format!("finish RFB client: {err}"),
                 false,
             )
-        })?;
+        })
+    })
+    .await
+    .map_err(|_| {
+        SessionFailure::new(
+            SessionErrorCode::Network,
+            format!(
+                "RFB handshake with {target} timed out after {}s",
+                HANDSHAKE_TIMEOUT.as_secs()
+            ),
+            true,
+        )
+    })??;
 
     let mut width = 0usize;
     let mut height = 0usize;
@@ -351,9 +394,12 @@ async fn connect_and_loop(
                     Some(SessionCommand::Close) | None => break,
                 }
             }
-            event = client.poll_event() => {
+            // Blocks until the engine has an event. `poll_event()` would return
+            // `Ok(None)` immediately and turn this select into a busy loop that
+            // burns a full core whenever the screen is idle.
+            event = client.recv_event() => {
                 match event {
-                    Ok(Some(event)) => match event {
+                    Ok(event) => match event {
                         VncEvent::SetResolution(Screen { width: new_width, height: new_height }) => {
                             width = new_width as usize;
                             height = new_height as usize;
@@ -369,6 +415,31 @@ async fn connect_and_loop(
                             let _ = events.send(SessionEvent::Copy { dst, src });
                         }
                         VncEvent::SetCursor(_, _) | VncEvent::Bell => {}
+                        VncEvent::AppleEncoding { code, rect, body } => {
+                            // Parsed and bounded by the engine. Surfaced in the
+                            // diagnostics log: the layout/machine are exactly what
+                            // a support ticket needs, and neither is predictable
+                            // from the host name.
+                            match vnc::apple::parse(code, &body) {
+                                vnc::apple::AppleInfo::Machine(model) => {
+                                    tracing::info!(%model, "remote Mac model");
+                                }
+                                vnc::apple::AppleInfo::Keyboard(layout) => {
+                                    tracing::info!(%layout, "remote keyboard layout");
+                                }
+                                vnc::apple::AppleInfo::Capabilities(entries) => {
+                                    tracing::debug!(count = entries.len(), "apple capabilities");
+                                }
+                                other => tracing::debug!(
+                                    code,
+                                    width = rect.width,
+                                    height = rect.height,
+                                    bytes = body.len(),
+                                    ?other,
+                                    "apple pseudo-encoding"
+                                ),
+                            }
+                        }
                         VncEvent::Text(text) => {
                             let _ = events.send(SessionEvent::Clipboard(text));
                         }
@@ -377,7 +448,23 @@ async fn connect_and_loop(
                         }
                         _ => {}
                     },
-                    Ok(None) => {}
+                    Err(vnc::VncError::ClientNotRunning) => {
+                        // The engine stopped: the peer closed the connection or
+                        // the decoder task ended. Treat it as a recoverable drop
+                        // so auto-reconnect actually reconnects.
+                        let failure = SessionFailure::new(
+                            SessionErrorCode::Network,
+                            "connection closed by peer",
+                            true,
+                        )
+                        .after_connect();
+                        let _ = events.send(SessionEvent::Error {
+                            code: failure.code,
+                            message: failure.message.clone(),
+                            retryable: failure.retryable,
+                        });
+                        return Err(failure);
+                    }
                     Err(err) => {
                         let failure = SessionFailure::from_vnc(err).after_connect();
                         let _ = events.send(SessionEvent::Error {
@@ -416,6 +503,11 @@ async fn connect_and_loop(
 
 impl SessionFailure {
     fn from_message(message: String) -> Self {
+        // The engine's decoder reports unsupported encodings as text; that is a
+        // permanent condition, so do not let auto-reconnect spin on it.
+        if message.contains("does not implement") {
+            return Self::new(SessionErrorCode::Protocol, message, false);
+        }
         let retryable = message.contains("server message")
             || message.contains("Image data")
             || message.contains("image data");
@@ -447,8 +539,33 @@ impl SessionFailure {
             VncError::WrongServerMessage | VncError::InvalidImageData => {
                 Self::new(SessionErrorCode::Protocol, err.to_string(), true)
             }
-            VncError::NoEncoding | VncError::WrongPixelFormat | VncError::ClientNotRunning => {
+            VncError::NoEncoding | VncError::WrongPixelFormat => {
                 Self::new(SessionErrorCode::Protocol, err.to_string(), false)
+            }
+            // Retrying cannot help: the Mac's resolution is simply above what
+            // this client will allocate. Say so, with the numbers.
+            VncError::FramebufferTooLarge {
+                width,
+                height,
+                pixels,
+                max_pixels,
+            } => Self::new(
+                SessionErrorCode::Protocol,
+                format!(
+                    "远端分辨率 {width}×{height}（{pixels} 像素）超过客户端上限 {max_pixels} 像素；\
+                     请在 Mac 上把「显示器 → 分辨率」调低（或使用缩放分辨率）后重连"
+                ),
+                false,
+            ),
+            VncError::UnsupportedEncoding(code) => Self::new(
+                SessionErrorCode::Protocol,
+                format!("服务端使用了不支持的编码 {code} (unsupported encoding)"),
+                false,
+            ),
+            // Not "the client is broken": either the peer went away or the
+            // engine was shut down. Reconnecting is the right response.
+            VncError::ClientNotRunning => {
+                Self::new(SessionErrorCode::Network, err.to_string(), true)
             }
             _ => Self::new(SessionErrorCode::Internal, err.to_string(), false),
         }

@@ -1,89 +1,95 @@
 # RustVNC
 
-RustVNC 是一个用 Rust 构建、面向 Windows 用户的 macOS VNC 客户端项目。
+RustVNC 是一个用 Rust 构建、面向 Windows 用户的 macOS 远程桌面项目。
+
+它由两条并行的链路组成：
+
+```text
+Windows 客户端 ── RFB/SSH (5900) ──────────► macOS screensharingd   画面 + 输入
+               └─ QUIC/TLS 1.3 (8443) ─────► RustVNC Agent         剪贴板 + 音频 + 控制
+```
+
+- **原生引擎**（零安装）：标准 RFB，ZRLE / zlib / CopyRect / Raw，Apple ARD 账号认证与 VNC 密码认证。
+- **增强引擎**（在 Mac 上装 Agent）：剪贴板双向、Opus 系统音频、mTLS 配对；画面仍走 RFB，Agent 出问题只丢功能、不丢会话。
 
 ## 文档
 
 - [总体设计（需求 / 架构 / 开发路径）](design.md)
 - [macOS Agent 设计（B1/B2、音频、视频、权限、配对）](agent-design.md)
-- [A0 骨架说明（菜单栏 / SMAppService / 单实例）](README-A0.md)
-- [A1 控制面说明（QUIC/TLS / 配对 / Ping-Pong）](README-A1.md)
-- [A2 菜单栏服务与剪贴板说明](README-A2.md)
-- [A2b Core Audio Tap + Opus 音频说明](README-A2B.md)
+- [A0 骨架说明](README-A0.md) · [A1 控制面](README-A1.md) · [A2 菜单栏与剪贴板](README-A2.md) · [A2b 音频](README-A2B.md)
 - [M0 兼容性报告](M0-COMPATIBILITY.md)
-- [M1 客户端状态报告](M1-STATUS.md)
+- [M1 / M1b 客户端状态报告](M1-STATUS.md)
+- [卡点分析与修复计划](BLOCKER-ANALYSIS.md)
+- [验收清单（真机）](ACCEPTANCE.md)
 
 ## 当前进度
 
-> **M0** 是总体协议里程碑；**A0–A2b** 是 macOS Agent 侧的阶段，两条线并行推进。
+> **M0** 是协议里程碑；**A0–A2b** 是 macOS Agent 侧；**M1/M1b** 是 Windows 客户端侧。
 
-- **M0 条件通过**：RFB 握手/安全类型/ARD/VNC 认证失败路径、mock 出画与输入；真机成功出画待凭据。见 [M0-COMPATIBILITY.md](M0-COMPATIBILITY.md)。
+### 已实现并经测试验证
 
-- **A0 已完成**：macOS Agent 最小骨架
-  - `LSUIElement` 菜单栏应用
-  - `SMAppService.agent` 注册 LaunchAgent
-  - launchd 崩溃自动拉起、正常退出不复活
-  - `flock` 单实例
-  - 文件日志与基础诊断
-- **A1 已完成**：Agent 控制面
-  - QUIC + TLS 1.3（ALPN `rustvnc-agent/1`）
-  - 一次性配对码、自签 CA、客户端证书（mTLS）
-  - `Hello / ServerHello`、`Ping / Pong`
-  - 客户端证书白名单（`clients.txt`）
-  - CSR 配对（客户端私钥不出本机）
-  - CA/服务器/客户端私钥存 Keychain（可 `--no-keychain` 回退文件）
-  - 按 IP 限流（配对与连接）
-  - 全链路集成测试（配对 / Ping / 拒绝 / 限流）
-  - `rvncctl` 命令行客户端（`pair` / `ping`）
-- **A2 已完成**：菜单栏服务 + 剪贴板
-  - 菜单栏启动时自动启动 QUIC 控制服务
-  - 显示服务器地址、配对码、客户端状态；一键复制配对码
-  - 停止/启动服务器；重新启动生成新配对码
-  - 双向 UTF-8 文本剪贴板（1 MiB，仅同步连接后的变化）
-- **A2b 已完成**：Core Audio Tap + Opus 音频
-  - Core Audio Process Tap（macOS 14.4+）
-  - 48 kHz 立体声、20 ms 帧、Opus 64 kbps
-  - QUIC datagram 传输；只有客户端请求音频时才启动 tap
-  - `rvncctl audio` 解码并统计 RMS
-- **M1 / M1b 条件通过**：Windows 客户端核心 + egui UI
-  - 配置 CRUD/搜索/导入导出、Keychain/Credential Manager
-  - 5 档画质 + 自定义、16/32bpp、ZRLE/Tight/Raw
-  - 键鼠/Unicode 输入、滚轮、修饰键、物理键位快捷键、按键重复
-  - SSH 隧道（系统 OpenSSH、严格主机密钥、仅密钥认证）
-  - 自动重连（指数退避）、统一错误码、每日滚动日志、一键诊断包
-  - 局部纹理更新、首次使用引导、系统 CJK 字体回退、剪贴板双向、诊断包导出、Windows Inno Setup 安装脚本
-  - mock 会话/自动重连端到端测试；真实帧率、延迟、30 分钟稳定性待凭据与 Windows 真机
-  - 见 [M1-STATUS.md](M1-STATUS.md)
-- **下一步**：M1b 验收（Windows 真机安装、真实 macOS 基准、Apple 1104 光标）；Agent 侧 A3：WASAPI 播放 + 抖动缓冲，或 B2 视频
+| 能力 | 状态 | 验证方式 |
+|---|---|---|
+| RFB 握手 / Apple ARD / VNC 密码 | ✅ | mock 端到端 + 真机握手（M0 报告） |
+| ZRLE / **zlib(6)** / CopyRect / Raw | ✅ | `encoding_compat` 端到端解码比对像素 |
+| Apple 私有编码 1104/1105/1107/1109/1110 | ⚠️ 安全跳过 | 未协商也不致命；**内容未解析**，需真机抓包确认 |
+| 未知编码 | ✅ 明确报错 | 一次性失败并给出编码号，不进入重连风暴 |
+| 键鼠输入 / 修饰键状态机 / 特殊键菜单 | ✅ | 单测 + 物理键位映射 |
+| 连接管理 / 配置 CRUD / 导入导出 | ✅ | 单测 |
+| 凭据存储（Credential Manager / Keychain） | ✅ | 单测（内存后端） |
+| 自动重连（指数退避，短会话不重置） | ✅ | mock 测试 |
+| 空闲 CPU | ✅ 0.000s / 3s | `idle_cost` 回归测试（曾为 100% 单核） |
+| 连接 / 握手超时 | ✅ 10s / 15s | 代码路径 + 超时分支 |
+| **Agent 通道：配对 / 剪贴板 / 音频** | ✅ | QUIC+TLS 回环：配对、双向剪贴板、Opus→WASAPI 出声 |
+| SSH 隧道：host key 首次信任、stderr 透出、密钥生成 | ✅ | 单测（known_hosts 匹配、命令加固、错误提示） |
+| 诊断日志 / 诊断包 | ✅ | 手动冒烟 |
+
+### 已知限制
+
+- **SSH 密码认证在 Windows 上不可用**：Windows 自带 OpenSSH 不支持非交互
+  `askpass`，客户端会明确报错并引导改用密钥（提供一键生成 ed25519 密钥 +
+  `authorized_keys` 安装指引）。真正的进程内 SSH（`russh`）尚未实现。
+- **Apple 私有编码的内容未解析**：默认不请求（配置里可开“Apple 扩展”），
+  只有真机抓包确认 1105/1109 的字节布局后才有意义。
+- **真机指标未测**：1080p 30 分钟稳定性、帧率、输入 P95 需要一台可连的 Mac +
+  Windows 真机，见 [ACCEPTANCE.md](ACCEPTANCE.md)。
+- **渲染是 OpenGL（eframe/glow）**，不是设计里的 D3D11；RDP 会话/虚拟机可能缺少
+  OpenGL 上下文。
+- Agent 安装包需要 Developer ID 签名 + 公证才能分发给他人（脚本已就绪，证书自备）。
 
 ## 目录
 
 ```text
-src/                # A0 Agent 源码
-resources/          # Info.plist 与 LaunchAgent plist
-scripts/            # 构建、安装、重置服务
-design.md           # 总体设计
-agent-design.md     # Agent 详细设计
-README-A0.md        # A0 使用说明
-README-A1.md        # A1 控制面说明
-README-A2.md        # A2 菜单栏与剪贴板说明
-README-A2B.md       # A2b Core Audio Tap + Opus 音频说明
-M0-COMPATIBILITY.md # M0 协议/兼容性报告
-crates/rfb-probe/   # M0 RFB 探针与 mock 测试
-crates/rustvnc-client/ # M1 Windows 客户端（Rust + egui）
-packaging/windows/  # M1b Inno Setup 安装脚本与图标
-M1-STATUS.md        # M1 客户端状态报告
+src/                        # macOS Agent（菜单栏、QUIC 控制面、剪贴板、音频）
+crates/rustvnc-client/      # Windows 客户端（RFB 会话 + egui UI + SSH）
+crates/agent-client/        # Windows 侧 Agent 客户端（配对、剪贴板、Opus→WASAPI）
+crates/rfb-probe/           # M0 协议探针
+vendor/vnc-rs/              # vnc-rs 0.6.1 + Apple 编码/zlib 补丁（见 PATCHES.md）
+resources/                  # Info.plist、LaunchAgent plist、entitlements
+scripts/                    # 构建 / 安装 / 公证 / 验收
+packaging/windows/          # Inno Setup + 签名脚本
 ```
 
-## 构建 Agent
+## 构建与测试
 
 ```bash
-cargo build
-./scripts/build-app.sh debug
-open "dist/RustVNC Agent.app"
+# Windows 客户端 + Agent 客户端 + 探针 + 协议引擎
+cargo test -p rustvnc-client -p rustvnc-agent-client -p rfb-probe -p vnc-rs
+cargo clippy -p rustvnc-client -p rustvnc-agent-client -p rfb-probe -p vnc-rs --all-targets -- -D warnings
+
+# macOS Agent（只能在 macOS 上编译）
+cargo test --workspace
+./scripts/build-app.sh release
 ```
 
-详见 [README-A0.md](README-A0.md)。
+> 根包 `rustvnc-agent` 是 macOS-only，所以 Windows 上 `cargo check --workspace`
+> 会失败；CI 按平台拆成 `macos` 与 `windows-client` 两个 job。
+
+一键验收：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/acceptance.ps1
+```
 
 ## 许可
 

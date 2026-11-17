@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use rustvnc_agent_client::{
+    AgentEvent, AgentSession, PairConfig, SessionConfig as AgentSessionConfig, pair,
+};
 use rustvnc_client::config::{
     AuthMode, ClientConfig, EncodingPreference, QualityPreset, SecurityMode,
 };
@@ -8,6 +11,7 @@ use rustvnc_client::credentials::CredentialStore;
 use rustvnc_client::input::{key_to_keysym, text_to_keysyms};
 use rustvnc_client::profiles::{Profile, ProfileStore};
 use rustvnc_client::session::{Session, SessionEvent};
+use rustvnc_client::ssh::{self, HostKeyProbe};
 use vnc::{ClientKeyEvent, ClientMouseEvent, Rect, X11Event};
 
 fn main() -> eframe::Result {
@@ -63,6 +67,88 @@ struct App {
     last_local_clipboard: Option<String>,
     last_remote_clipboard: Option<String>,
     last_clipboard_poll: Instant,
+    /// Which modifiers the remote currently has held down. Tracked so the
+    /// client can send real transitions instead of re-deriving them per key,
+    /// which is what makes Ctrl+click and Shift+drag work.
+    sent_modifiers: ModifierState,
+    /// Host key fetched for the current form, waiting for the user to compare
+    /// the fingerprint and pin it.
+    host_key_probe: Option<HostKeyProbe>,
+    /// Multi-line, user-facing note that is not an error (e.g. the public key
+    /// to install on the Mac).
+    info: Option<String>,
+    /// Enhanced channel to the macOS agent: clipboard + audio. Optional, and a
+    /// failure here never tears down the RFB session.
+    agent: Option<AgentSession>,
+    agent_status: String,
+    agent_pair_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+}
+
+/// The four modifiers RFB can express, as remote state rather than per-event
+/// flags.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ModifierState {
+    shift: bool,
+    ctrl: bool,
+    alt: bool,
+    /// The Windows key, which macOS receives as Command. Deliberately not
+    /// egui's `Modifiers::command`: that field aliases Ctrl on Windows, so
+    /// using it would emit Ctrl+Super for every Ctrl shortcut.
+    command: bool,
+}
+
+impl ModifierState {
+    fn from_egui(modifiers: egui::Modifiers) -> Self {
+        Self {
+            shift: modifiers.shift,
+            ctrl: modifiers.ctrl,
+            alt: modifiers.alt,
+            command: modifiers.mac_cmd,
+        }
+    }
+
+    /// (keysym, down) transitions that turn `from` into `to`, in send order.
+    fn transitions(from: Self, to: Self) -> Vec<(u32, bool)> {
+        let mut out = Vec::new();
+        for key in Self::PRESS_ORDER {
+            if (key.held)(&to) && !(key.held)(&from) {
+                out.push((key.keysym, true));
+            }
+        }
+        for key in Self::PRESS_ORDER.iter().rev() {
+            if (key.held)(&from) && !(key.held)(&to) {
+                out.push((key.keysym, false));
+            }
+        }
+        out
+    }
+
+    /// Press order; releases run backwards.
+    const PRESS_ORDER: [ModifierKey; 4] = [
+        ModifierKey {
+            keysym: 0xffe1,
+            held: |m| m.shift,
+        }, // Shift_L
+        ModifierKey {
+            keysym: 0xffe3,
+            held: |m| m.ctrl,
+        }, // Control_L
+        ModifierKey {
+            keysym: 0xffe9,
+            held: |m| m.alt,
+        }, // Alt_L
+        ModifierKey {
+            keysym: 0xffeb,
+            held: |m| m.command,
+        }, // Super_L
+    ];
+}
+
+/// One RFB keysym plus a predicate reading that modifier out of a snapshot.
+#[derive(Clone, Copy)]
+struct ModifierKey {
+    keysym: u32,
+    held: fn(&ModifierState) -> bool,
 }
 
 impl App {
@@ -110,6 +196,12 @@ impl App {
             last_local_clipboard: None,
             last_remote_clipboard: None,
             last_clipboard_poll: Instant::now(),
+            sent_modifiers: ModifierState::default(),
+            host_key_probe: None,
+            info: None,
+            agent: None,
+            agent_status: String::new(),
+            agent_pair_rx: None,
         }
     }
 
@@ -123,7 +215,67 @@ impl App {
                 .unwrap_or_default();
             self.selected_id = Some(profile.id.clone());
             self.draft = profile;
+            self.draft.config.ssh.password = self
+                .credentials
+                .get(&ssh_credential_key(&self.draft.id))
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            self.host_key_probe = None;
             self.error = None;
+        }
+    }
+
+    /// Fetch the host key and show its SHA256 fingerprint. Nothing is trusted
+    /// until the user confirms it and [`Self::trust_host_key`] runs.
+    fn probe_host_key(&mut self) {
+        let host = self.draft.config.host.clone();
+        let port = self.draft.config.ssh.port;
+        match ssh::probe_host_key(&host, port) {
+            Ok(probe) => {
+                self.status = format!("已获取 {host}:{port} 的主机密钥，请核对指纹");
+                self.host_key_probe = Some(probe);
+                self.error = None;
+            }
+            Err(err) => {
+                self.host_key_probe = None;
+                self.error = Some(format!("{err:#}"));
+            }
+        }
+    }
+
+    fn trust_host_key(&mut self) {
+        let Some(probe) = self.host_key_probe.clone() else {
+            return;
+        };
+        let path = ssh::known_hosts_path(&self.draft.config.ssh);
+        match ssh::trust_host_key(&path, &probe.known_hosts) {
+            Ok(()) => {
+                self.status = format!("已写入 {}", path.display());
+                self.host_key_probe = None;
+                self.error = None;
+            }
+            Err(err) => self.error = Some(format!("{err:#}")),
+        }
+    }
+
+    fn generate_ssh_key(&mut self) {
+        let path = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".ssh")
+            .join("rustvnc_ed25519");
+        match ssh::generate_key(&path) {
+            Ok(public) => {
+                self.draft.config.ssh.key_path = path.display().to_string();
+                self.status = format!("已生成 {}", path.display());
+                self.error = None;
+                // The private key never leaves this machine; the user has to
+                // install the public half once on the Mac.
+                self.info = Some(format!(
+                    "把下面这行追加到 Mac 的 ~/.ssh/authorized_keys（一次性）：\n{public}"
+                ));
+            }
+            Err(err) => self.error = Some(format!("{err:#}")),
         }
     }
 
@@ -162,11 +314,19 @@ impl App {
 
     fn connect(&mut self) {
         self.save_profile();
-        if self.draft.config.security == SecurityMode::Ssh
-            && self.draft.config.ssh.user.trim().is_empty()
-        {
-            self.error = Some("SSH user is required".to_string());
-            return;
+        if self.draft.config.security == SecurityMode::Ssh {
+            if self.draft.config.ssh.user.trim().is_empty() {
+                self.error = Some("SSH 用户名不能为空 (SSH user is required)".to_string());
+                return;
+            }
+            // `SshConfig::password` is `#[serde(skip)]`: keep the secret in the
+            // credential store, never in profiles.json.
+            if self.remember && !self.draft.config.ssh.password.is_empty() {
+                let _ = self.credentials.set(
+                    &ssh_credential_key(&self.draft.id),
+                    &self.draft.config.ssh.password,
+                );
+            }
         }
         if self.draft.config.host.trim().is_empty() {
             self.error = Some("host is required".to_string());
@@ -190,10 +350,12 @@ impl App {
                 self.last_local_clipboard = read_local_clipboard();
                 self.last_remote_clipboard = None;
                 self.last_clipboard_poll = Instant::now();
+                self.sent_modifiers = ModifierState::default();
                 self.status = format!("Connecting to {}", session.local_addr());
                 self.stats.clear();
                 self.error = None;
                 self.session = Some(session);
+                self.start_agent();
             }
             Err(err) => {
                 self.error = Some(format!("connect: {err:#}"));
@@ -202,10 +364,145 @@ impl App {
         }
     }
 
+    /// Start the optional agent channel. Any failure is reported in
+    /// `agent_status` and leaves the RFB session untouched — the agent only
+    /// adds clipboard and audio.
+    fn start_agent(&mut self) {
+        if !self.draft.config.agent.enabled {
+            return;
+        }
+        let addr = format!(
+            "{}:{}",
+            self.draft.config.host, self.draft.config.agent.port
+        );
+        match AgentSession::start(AgentSessionConfig {
+            addr,
+            client_name: local_client_name(),
+            state_dir: rustvnc_agent_client::default_state_dir(),
+            audio: self.draft.config.agent.audio,
+        }) {
+            Ok(session) => {
+                self.agent_status = "连接 Agent…".to_string();
+                self.agent = Some(session);
+            }
+            Err(err) => {
+                self.agent_status = format!("{err:#}");
+                self.agent = None;
+            }
+        }
+    }
+
+    fn poll_agent(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.agent_pair_rx {
+            match rx.try_recv() {
+                Ok(Ok(fingerprint)) => {
+                    self.agent_status = format!("已配对，Agent 指纹 {fingerprint}");
+                    self.agent_pair_rx = None;
+                }
+                Ok(Err(message)) => {
+                    self.agent_status = message;
+                    self.agent_pair_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.agent_pair_rx = None;
+                }
+            }
+        }
+
+        let mut events = Vec::new();
+        if let Some(agent) = &self.agent {
+            while let Some(event) = agent.try_recv() {
+                events.push(event);
+            }
+        }
+        for event in events {
+            match event {
+                AgentEvent::Connected {
+                    agent,
+                    capabilities,
+                } => {
+                    let audio = if capabilities & rustvnc_agent_client::CAP_AUDIO != 0 {
+                        "音频可用"
+                    } else {
+                        "音频未启用"
+                    };
+                    self.agent_status = format!("{agent} · {audio}");
+                }
+                AgentEvent::Clipboard(text) => {
+                    if self.clipboard_sync {
+                        self.last_remote_clipboard = Some(text.clone());
+                        // Remember it as the local value too, so the poller does
+                        // not bounce it straight back to the Mac.
+                        self.last_local_clipboard = Some(text.clone());
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let _ = clipboard.set_text(text.clone());
+                        }
+                        ctx.copy_text(text);
+                    }
+                }
+                AgentEvent::AudioStarted => {
+                    if !self.agent_status.contains("音频播放中") {
+                        self.agent_status.push_str(" · 音频播放中");
+                    }
+                }
+                AgentEvent::AudioStopped => {}
+                AgentEvent::Error(message) => self.agent_status = message,
+                AgentEvent::Closed => {
+                    self.agent_status = "Agent 通道已断开".to_string();
+                    self.agent = None;
+                }
+            }
+        }
+    }
+
+    /// Pair with the agent in the background: `pair()` needs a Tokio runtime and
+    /// the QUIC handshake must not block the UI thread.
+    fn pair_agent(&mut self) {
+        let addr = format!(
+            "{}:{}",
+            self.draft.config.host, self.draft.config.agent.port
+        );
+        let code = self.draft.config.agent.pair_code.trim().to_string();
+        if code.is_empty() {
+            self.agent_status = "请输入 Mac 菜单栏显示的配对码".to_string();
+            return;
+        }
+        let expected = self.draft.config.agent.fingerprint.trim().to_string();
+        let name = local_client_name();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.agent_pair_rx = Some(rx);
+        self.agent_status = "配对中…".to_string();
+        std::thread::spawn(move || {
+            let result = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime
+                    .block_on(pair(PairConfig {
+                        addr,
+                        code,
+                        client_name: name,
+                        state_dir: rustvnc_agent_client::default_state_dir(),
+                        expect_fingerprint: (!expected.is_empty()).then_some(expected),
+                    }))
+                    .map(|outcome| outcome.server_fingerprint),
+                Err(err) => Err(anyhow::anyhow!("create tokio runtime: {err}")),
+            };
+            let _ = tx.send(result.map_err(|err| format!("配对失败：{err:#}")));
+        });
+    }
+
     fn disconnect(&mut self) {
+        // Never leave a modifier held on the remote side.
+        self.sync_modifiers(ModifierState::default());
         if let Some(mut session) = self.session.take() {
             session.close();
         }
+        if let Some(mut agent) = self.agent.take() {
+            agent.stop();
+        }
+        self.agent_status.clear();
         self.status = "Disconnected".to_string();
         self.texture = None;
         self.frame_dirty = false;
@@ -213,6 +510,8 @@ impl App {
     }
 
     fn poll_session(&mut self, ctx: &egui::Context) {
+        self.poll_agent(ctx);
+
         let mut events = Vec::new();
         if let Some(session) = &self.session {
             while let Some(event) = session.try_recv() {
@@ -356,6 +655,7 @@ impl App {
                     });
                 ui.label(lang.t("画质（重连生效）", "Quality (reconnect)"));
                 ui.checkbox(&mut self.clipboard_sync, lang.t("剪贴板", "Clipboard"));
+                self.special_keys_menu(ui);
                 if ui.button(lang.t("发送剪贴板", "Send clipboard")).clicked()
                     && let Ok(mut clipboard) = arboard::Clipboard::new()
                     && let Ok(text) = clipboard.get_text()
@@ -498,6 +798,66 @@ impl App {
                     ui.end_row();
                 }
 
+                ui.label(lang.t("Apple 扩展", "Apple encodings"));
+                ui.checkbox(
+                    &mut self.draft.config.apple_encodings,
+                    lang.t("请求 1104/1105/1109/1110（实验）", "Request 1104/1105/1109/1110 (experimental)"),
+                )
+                .on_hover_text(lang.t(
+                    "只为真机验证准备：这些私有编码的内容尚未在目标 macOS 版本上确认。",
+                    "For real-device validation only: the payload layout is not confirmed against the target macOS build.",
+                ));
+                ui.end_row();
+
+                ui.label(lang.t("增强通道", "Agent channel"));
+                ui.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut self.draft.config.agent.enabled,
+                        lang.t("剪贴板/音频", "Clipboard/audio"),
+                    )
+                    .on_hover_text(lang.t(
+                        "需要在 Mac 上安装 RustVNC Agent；视频仍走 RFB。",
+                        "Requires the RustVNC Agent on the Mac; video stays on RFB.",
+                    ));
+                    ui.add_enabled(
+                        self.draft.config.agent.enabled,
+                        egui::Checkbox::new(
+                            &mut self.draft.config.agent.audio,
+                            lang.t("音频", "Audio"),
+                        ),
+                    );
+                    ui.label(": ");
+                    ui.add_enabled(
+                        self.draft.config.agent.enabled,
+                        egui::DragValue::new(&mut self.draft.config.agent.port).range(1..=65535),
+                    );
+                });
+                ui.end_row();
+
+                if self.draft.config.agent.enabled {
+                    ui.label(lang.t("配对码", "Pairing code"));
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.draft.config.agent.pair_code)
+                                .desired_width(96.0)
+                                .hint_text("Mac 菜单栏"),
+                        );
+                        if ui.button(lang.t("配对", "Pair")).clicked() {
+                            self.pair_agent();
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label(lang.t("Agent 状态", "Agent status"));
+                    let status = if self.agent_status.is_empty() {
+                        lang.t("未连接", "Not connected").to_string()
+                    } else {
+                        self.agent_status.clone()
+                    };
+                    ui.label(status);
+                    ui.end_row();
+                }
+
                 ui.label(lang.t("安全", "Security"));
                 egui::ComboBox::from_id_salt("security")
                     .selected_text(self.draft.config.security.label())
@@ -528,6 +888,48 @@ impl App {
                     ui.label(lang.t("known_hosts", "known_hosts"));
                     ui.text_edit_singleline(&mut self.draft.config.ssh.known_hosts);
                     ui.end_row();
+
+                    ui.label(lang.t("主机密钥", "Host key"));
+                    ui.horizontal(|ui| {
+                        if ui.button(lang.t("探测指纹", "Fetch fingerprint")).clicked() {
+                            self.probe_host_key();
+                        }
+                        if ui
+                            .add_enabled(
+                                self.host_key_probe.is_some(),
+                                egui::Button::new(lang.t("我已核对，信任", "Verified, trust it")),
+                            )
+                            .clicked()
+                        {
+                            self.trust_host_key();
+                        }
+                    });
+                    ui.end_row();
+
+                    if let Some(probe) = &self.host_key_probe {
+                        ui.label("");
+                        ui.label(egui::RichText::new(&probe.fingerprint).monospace().small());
+                        ui.end_row();
+                    }
+
+                    ui.label(lang.t("SSH 密码", "SSH password"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.draft.config.ssh.password)
+                            .password(true)
+                            .hint_text(lang.t(
+                                "仅密钥认证时留空",
+                                "Leave empty when using a key",
+                            )),
+                    );
+                    ui.end_row();
+
+                    ui.label(lang.t("密钥", "Key"));
+                    ui.horizontal(|ui| {
+                        if ui.button(lang.t("生成密钥", "Generate key")).clicked() {
+                            self.generate_ssh_key();
+                        }
+                    });
+                    ui.end_row();
                 }
             });
 
@@ -544,6 +946,21 @@ impl App {
             }
         });
         ui.add_space(8.0);
+        if let Some(info) = self.info.clone() {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                // Read-only multiline so the public key can be selected and
+                // copied; nothing here is a secret.
+                let mut text = info;
+                ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .desired_rows(2)
+                        .font(egui::TextStyle::Monospace),
+                );
+                if ui.button(lang.t("知道了", "Dismiss")).clicked() {
+                    self.info = None;
+                }
+            });
+        }
         ui.label(lang.t(
             "提示：SSH 隧道使用系统 OpenSSH，仅支持密钥认证，主机密钥变更会被拒绝。",
             "SSH uses system OpenSSH with key auth only; host key changes are rejected.",
@@ -557,6 +974,18 @@ impl App {
         if self.session.is_none() || self.frame.width == 0 || self.frame.height == 0 {
             return;
         }
+
+        // Mirror the local modifier state to the remote every frame. Doing it
+        // here (instead of synthesising modifiers around each keystroke) is
+        // what makes Ctrl+click, Shift+drag and modifier-only presses behave;
+        // releasing on focus loss also prevents keys getting stuck remotely.
+        let focused = ctx.input(|input| input.focused);
+        let local_modifiers = if focused {
+            ModifierState::from_egui(ctx.input(|input| input.modifiers))
+        } else {
+            ModifierState::default()
+        };
+        self.sync_modifiers(local_modifiers);
 
         let (hover, primary, secondary, middle, scroll) = ctx.input(|input| {
             (
@@ -622,23 +1051,48 @@ impl App {
                         modifiers,
                         ..
                     } => {
-                        if modifiers.command || modifiers.ctrl || modifiers.alt {
-                            if !repeat {
-                                self.send_shortcut(physical_key.unwrap_or(key), modifiers);
-                            }
-                        } else if is_special_key(key)
-                            && let Some(keysym) = key_to_keysym(key, modifiers.shift)
-                        {
-                            self.send_keysym_with_modifiers(keysym, modifiers);
-                        }
-                    }
-                    egui::Event::Text(text) => {
-                        let modifiers = ctx.input(|input| input.modifiers);
-                        if !modifiers.command && !modifiers.ctrl && !modifiers.alt {
-                            for keysym in text_to_keysyms(&text) {
+                        let physical = physical_key.unwrap_or(key);
+                        if is_special_key(key) {
+                            // Arrows/Enter/Tab repeat is useful; keep it.
+                            if let Some(keysym) = key_to_keysym(physical, modifiers.shift) {
                                 self.send_key(keysym, true);
                                 self.send_key(keysym, false);
                             }
+                        } else if !repeat
+                            && (local_modifiers.ctrl
+                                || local_modifiers.alt
+                                || local_modifiers.command)
+                        {
+                            // Shortcut: the modifiers are already held remotely,
+                            // so only the key itself is sent (Cmd+W, Ctrl+C, …).
+                            if let Some(keysym) = key_to_keysym(physical, modifiers.shift) {
+                                self.send_key(keysym, true);
+                                self.send_key(keysym, false);
+                            }
+                        }
+                        // Plain characters arrive through Event::Text below.
+                    }
+                    egui::Event::Text(text) => {
+                        if text.is_empty() {
+                            continue;
+                        }
+                        // A modified keystroke is a shortcut, not text.
+                        if local_modifiers.ctrl || local_modifiers.alt || local_modifiers.command {
+                            continue;
+                        }
+                        // The engine already applied Shift/CapsLock/IME when it
+                        // produced this text, so the remote must not also see a
+                        // modifier held on top of the character we send.
+                        let restore = self.sent_modifiers;
+                        if restore != ModifierState::default() {
+                            self.sync_modifiers(ModifierState::default());
+                        }
+                        for keysym in text_to_keysyms(&text) {
+                            self.send_key(keysym, true);
+                            self.send_key(keysym, false);
+                        }
+                        if restore != ModifierState::default() {
+                            self.sync_modifiers(restore);
                         }
                     }
                     _ => {}
@@ -647,34 +1101,61 @@ impl App {
         }
     }
 
-    fn send_shortcut(&self, key: egui::Key, modifiers: egui::Modifiers) {
-        if let Some(keysym) = key_to_keysym(key, modifiers.shift) {
-            self.send_keysym_with_modifiers(keysym, modifiers);
+    /// Send the transitions that bring the remote modifier state to `target`.
+    /// Presses run in a fixed order and releases in reverse so the remote never
+    /// sees a shortcut key before the modifiers it belongs to.
+    fn sync_modifiers(&mut self, target: ModifierState) {
+        if self.session.is_none() {
+            self.sent_modifiers = target;
+            return;
+        }
+        let current = self.sent_modifiers;
+        if current == target {
+            return;
+        }
+        for (keysym, down) in ModifierState::transitions(current, target) {
+            self.send_key(keysym, down);
+        }
+        self.sent_modifiers = target;
+    }
+
+    /// Send a fixed key combination regardless of what the local keyboard is
+    /// doing — the "special keys" menu (Cmd+Tab, Cmd+Space, …). Without this
+    /// there is no way to reach shortcuts egui never reports as key events.
+    fn send_combo(&mut self, keysyms: &[u32]) {
+        self.sync_modifiers(ModifierState::default());
+        for keysym in keysyms {
+            self.send_key(*keysym, true);
+        }
+        for keysym in keysyms.iter().rev() {
+            self.send_key(*keysym, false);
         }
     }
 
-    fn send_keysym_with_modifiers(&self, keysym: u32, modifiers: egui::Modifiers) {
-        let mut held = Vec::new();
-        if modifiers.shift {
-            held.push(0xffe1);
-        }
-        if modifiers.ctrl {
-            held.push(0xffe3);
-        }
-        if modifiers.alt {
-            held.push(0xffe9);
-        }
-        if modifiers.command {
-            held.push(0xffeb);
-        }
-        for modifier in &held {
-            self.send_key(*modifier, true);
-        }
-        self.send_key(keysym, true);
-        self.send_key(keysym, false);
-        for modifier in held.iter().rev() {
-            self.send_key(*modifier, false);
-        }
+    fn special_keys_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("⌘ 特殊键", |ui| {
+            const CMD: u32 = 0xffeb; // Super_L → Command
+            const CTRL: u32 = 0xffe3;
+            const OPT: u32 = 0xffe9;
+            const SHIFT: u32 = 0xffe1;
+            const TAB: u32 = 0xff09;
+            const ESC: u32 = 0xff1b;
+            const SPACE: u32 = 0x20;
+            let items: [(&str, &str, &[u32]); 7] = [
+                ("⌘Tab", "切换应用 / App switcher", &[CMD, TAB]),
+                ("⌘Space", "聚焦搜索 / Spotlight", &[CMD, SPACE]),
+                ("⌘Q", "退出应用 / Quit app", &[CMD, 0x71]),
+                ("⌘W", "关闭窗口 / Close window", &[CMD, 0x77]),
+                ("⌃⌘Q", "锁屏 / Lock screen", &[CTRL, CMD, 0x71]),
+                ("⌘⌥Esc", "强制退出 / Force quit", &[CMD, OPT, ESC]),
+                ("⌘⇧3", "截屏 / Screenshot", &[CMD, SHIFT, 0x33]),
+            ];
+            for (combo, name, keys) in items {
+                if ui.button(format!("{combo}  {name}")).clicked() {
+                    self.send_combo(keys);
+                }
+            }
+        });
     }
 
     fn send_key(&self, keysym: u32, down: bool) {
@@ -697,7 +1178,7 @@ impl App {
     }
 
     fn sync_clipboard(&mut self) {
-        if !self.clipboard_sync || self.session.is_none() {
+        if !self.clipboard_sync || (self.session.is_none() && self.agent.is_none()) {
             return;
         }
         if self.last_clipboard_poll.elapsed() < Duration::from_millis(700) {
@@ -714,8 +1195,13 @@ impl App {
             self.last_local_clipboard = Some(text);
             return;
         }
+        // RFB carries the clipboard for third-party servers; macOS itself only
+        // moves it over the agent channel, so both paths get the text.
         if let Some(session) = &self.session {
             session.send_input(X11Event::CopyText(text.clone()));
+        }
+        if let Some(agent) = &self.agent {
+            agent.send_clipboard(text.clone());
         }
         self.last_local_clipboard = Some(text);
     }
@@ -1052,5 +1538,75 @@ impl Frame {
             [width, height],
             &rgba,
         ))
+    }
+}
+
+/// Name this client announces to the agent (shown in the Mac menu bar).
+fn local_client_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "rustvnc-client".to_string())
+}
+/// Credential-store key for the SSH password of a profile. Kept separate from
+/// the VNC/ARD password so one can be rotated without the other.
+fn ssh_credential_key(profile_id: &str) -> String {
+    format!("{profile_id}#ssh")
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_is_not_translated_into_command() {
+        // On Windows egui sets `command` whenever ctrl is down. Using that
+        // field for Super_L would send Ctrl+Command for every Ctrl shortcut,
+        // which is exactly the bug this guards.
+        let modifiers = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        let state = ModifierState::from_egui(modifiers);
+        assert!(state.ctrl);
+        assert!(!state.command, "Ctrl must not become Command");
+        assert_eq!(
+            ModifierState::transitions(ModifierState::default(), state),
+            vec![(0xffe3, true)]
+        );
+    }
+
+    #[test]
+    fn windows_key_maps_to_super() {
+        let modifiers = egui::Modifiers {
+            mac_cmd: true,
+            ..Default::default()
+        };
+        let state = ModifierState::from_egui(modifiers);
+        assert_eq!(
+            ModifierState::transitions(ModifierState::default(), state),
+            vec![(0xffeb, true)]
+        );
+    }
+
+    #[test]
+    fn releases_run_in_reverse_press_order() {
+        let both = ModifierState {
+            shift: true,
+            ctrl: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            ModifierState::transitions(both, ModifierState::default()),
+            vec![(0xffe3, false), (0xffe1, false)]
+        );
+    }
+
+    #[test]
+    fn unchanged_modifiers_send_nothing() {
+        let state = ModifierState {
+            alt: true,
+            ..Default::default()
+        };
+        assert!(ModifierState::transitions(state, state).is_empty());
     }
 }

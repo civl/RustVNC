@@ -1,0 +1,23 @@
+# Normalise line endings: the product ships on Windows but the agent, the CI
+# runners and every script are macOS/Linux. With core.autocrlf=true (the Git for
+# Windows default) a Windows checkout would otherwise rewrite scripts/*.sh to
+# CRLF and break them on the Mac.
+* text=auto eol=lf
+
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+*.plist text eol=lf
+*.ps1   text eol=crlf
+*.iss   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+*.png   binary
+*.ico   binary
+*.icns  binary
+*.crate binary
+*.gz    binary

@@ -31,6 +31,10 @@ struct Cli {
     password: Option<String>,
     #[arg(long, value_enum, default_value_t = AuthMode::Auto)]
     auth: AuthMode,
+    /// Also request Apple's private pseudo-encodings (1104/1105/1107/1109/1110)
+    /// so their bodies can be captured and decoded.
+    #[arg(long)]
+    apple: bool,
     #[arg(long, default_value_t = 32)]
     bpp: u8,
     #[arg(long, value_enum, default_value_t = EncodingMode::Zrle)]
@@ -60,6 +64,8 @@ enum AuthMode {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum EncodingMode {
     Zrle,
+    /// Standard zlib rectangles (RFB encoding 6).
+    Zlib,
     Tight,
     Raw,
 }
@@ -115,6 +121,17 @@ async fn run(cli: Cli) -> Result<()> {
         connector = connector.add_encoding(encoding);
     }
 
+    if cli.apple {
+        for encoding in [
+            VncEncoding::AppleCursorPseudo,
+            VncEncoding::AppleDisplayPseudo,
+            VncEncoding::AppleCapabilitiesPseudo,
+            VncEncoding::AppleKeyboardPseudo,
+            VncEncoding::AppleMachinePseudo,
+        ] {
+            connector = connector.add_encoding(encoding);
+        }
+    }
     if cli.auth != AuthMode::Vnc
         && let Some(user) = user.as_ref()
     {
@@ -148,21 +165,25 @@ async fn run(cli: Cli) -> Result<()> {
     let deadline = start + Duration::from_secs(cli.seconds);
     let mut last_refresh = Instant::now() - Duration::from_millis(50);
     let mut last_present = Instant::now() - Duration::from_millis(50);
+    let mut requested_full = false;
 
     while Instant::now() < deadline {
-        match client.poll_event().await {
-            Ok(Some(event)) => {
+        // Wait for an event with a short timeout instead of polling: `poll_event`
+        // is a non-blocking `try_recv`, so looping on it would burn a core and
+        // distort the very frame-rate numbers this tool exists to produce.
+        match tokio::time::timeout(Duration::from_millis(10), client.recv_event()).await {
+            Ok(Ok(event)) => {
                 if let Some(event) =
                     handle_event(event, &mut framebuffer, &mut window, &mut rects, &mut bytes)?
                 {
                     warn!("unhandled event: {event:?}");
                 }
             }
-            Ok(None) => {}
-            Err(err) => {
+            Ok(Err(err)) => {
                 eprintln!("vnc error: {err}");
                 break;
             }
+            Err(_) => {}
         }
 
         if let Some(window) = window.as_mut()
@@ -178,7 +199,17 @@ async fn run(cli: Cli) -> Result<()> {
         }
 
         if last_refresh.elapsed() >= Duration::from_millis(33) {
-            let _ = client.input(X11Event::Refresh).await;
+            // The first request must be non-incremental: macOS answers an
+            // incremental request with only the regions it considers changed, so
+            // a `--save` captured before anything moves contains black where no
+            // pixels ever arrived.
+            let event = if requested_full {
+                X11Event::Refresh
+            } else {
+                requested_full = true;
+                X11Event::FullRefresh
+            };
+            let _ = client.input(event).await;
             last_refresh = Instant::now();
         }
 
@@ -257,6 +288,19 @@ fn handle_event(
                 format.red_max,
                 format.green_max,
                 format.blue_max
+            );
+        }
+        VncEvent::AppleEncoding { code, rect, body } => {
+            let shown: Vec<String> = body.iter().take(48).map(|b| format!("{b:02x}")).collect();
+            println!(
+                "apple encoding {code}: rect {}x{}+{}+{} body={} bytes [{}]{}",
+                rect.width,
+                rect.height,
+                rect.x,
+                rect.y,
+                body.len(),
+                shown.join(" "),
+                if body.len() > 48 { " ..." } else { "" }
             );
         }
         VncEvent::RawImage(rect, data) => {
@@ -340,6 +384,12 @@ fn encodings(mode: EncodingMode) -> Vec<VncEncoding> {
     match mode {
         EncodingMode::Zrle => vec![
             VncEncoding::Zrle,
+            VncEncoding::CopyRect,
+            VncEncoding::CursorPseudo,
+            VncEncoding::DesktopSizePseudo,
+        ],
+        EncodingMode::Zlib => vec![
+            VncEncoding::Zlib,
             VncEncoding::CopyRect,
             VncEncoding::CursorPseudo,
             VncEncoding::DesktopSizePseudo,
@@ -538,9 +588,12 @@ impl FrameBuffer {
             16 => {
                 for pixel in self.data.as_chunks::<2>().0 {
                     let value = u16::from_le_bytes([pixel[0], pixel[1]]);
-                    let r = ((value >> 11) & 0x1f) as u8 * 255 / 31;
-                    let g = ((value >> 5) & 0x3f) as u8 * 255 / 63;
-                    let b = (value & 0x1f) as u8 * 255 / 31;
+                    // Widen before scaling: `channel as u8 * 255` overflows u8 for
+                    // any non-zero channel (31 * 255 panics in debug, wraps in
+                    // release and produces wrong colours).
+                    let r = (((value >> 11) & 0x1f) * 255 / 31) as u8;
+                    let g = (((value >> 5) & 0x3f) * 255 / 63) as u8;
+                    let b = ((value & 0x1f) * 255 / 31) as u8;
                     rgb.extend_from_slice(&[r, g, b]);
                 }
             }

@@ -1,6 +1,13 @@
 [workspace]
-members = ["crates/rfb-probe", "crates/rustvnc-client"]
+members = ["crates/agent-client", "crates/rfb-probe", "crates/rustvnc-client", "vendor/vnc-rs"]
 resolver = "3"
+
+# The Apple pseudo-encodings (1104/1105/1109/1110), the zlib(6) rectangle
+# encoding and non-fatal handling of unknown encodings all live inside the
+# protocol engine's closed enums, so they cannot be added from outside.
+# `vendor/vnc-rs` is upstream 0.6.1 plus those patches; see PATCHES.md there.
+[patch.crates-io]
+vnc-rs = { path = "vendor/vnc-rs" }
 
 [package]
 name = "rustvnc-agent"

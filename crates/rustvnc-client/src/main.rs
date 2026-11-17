@@ -1617,9 +1617,12 @@ impl Frame {
             16 => {
                 for pixel in self.data.as_chunks::<2>().0 {
                     let value = u16::from_le_bytes(*pixel);
-                    let r = ((value >> 11) & 0x1f) as u8 * 255 / 31;
-                    let g = ((value >> 5) & 0x3f) as u8 * 255 / 63;
-                    let b = (value & 0x1f) as u8 * 255 / 31;
+                    // Widen before scaling: `channel as u8 * 255` overflows u8
+                    // (31 * 255 wraps in release to 225, i.e. ~7 after division),
+                    // which collapsed every channel towards black.
+                    let r = (((value >> 11) & 0x1f) * 255 / 31) as u8;
+                    let g = (((value >> 5) & 0x3f) * 255 / 63) as u8;
+                    let b = ((value & 0x1f) * 255 / 31) as u8;
                     rgba.extend_from_slice(&[r, g, b, 255]);
                 }
             }
@@ -1650,9 +1653,10 @@ impl Frame {
                 16 => {
                     for pixel in line.as_chunks::<2>().0 {
                         let value = u16::from_le_bytes(*pixel);
-                        let r = ((value >> 11) & 0x1f) as u8 * 255 / 31;
-                        let g = ((value >> 5) & 0x3f) as u8 * 255 / 63;
-                        let b = (value & 0x1f) as u8 * 255 / 31;
+                        // Same widening rule as `to_color_image`.
+                        let r = (((value >> 11) & 0x1f) * 255 / 31) as u8;
+                        let g = (((value >> 5) & 0x3f) * 255 / 63) as u8;
+                        let b = ((value & 0x1f) * 255 / 31) as u8;
                         rgba.extend_from_slice(&[r, g, b, 255]);
                     }
                 }
@@ -1737,5 +1741,57 @@ mod tests {
             ..Default::default()
         };
         assert!(ModifierState::transitions(state, state).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod pixel_tests {
+    use super::*;
+
+    /// RGB565 must survive the conversion. `channel as u8 * 255` used to wrap in
+    /// release builds and turned a 16 bpp ("极速") session almost black.
+    fn frame_from(pixels: &[u16]) -> Frame {
+        Frame {
+            width: pixels.len(),
+            height: 1,
+            bpp: 16,
+            data: pixels
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn sixteen_bpp_pixels_keep_their_colour() {
+        // 0xF800 pure red, 0xFFFF white, 0x8410 mid grey in RGB565.
+        let frame = frame_from(&[0xF800, 0xFFFF, 0x8410]);
+        let image = frame.to_color_image();
+        assert_eq!(image.pixels[0], egui::Color32::from_rgb(255, 0, 0));
+        assert_eq!(image.pixels[1], egui::Color32::from_rgb(255, 255, 255));
+        let grey = image.pixels[2];
+        assert!(
+            grey.r() > 120 && grey.g() > 120 && grey.b() > 120,
+            "mid grey collapsed towards black: {grey:?}"
+        );
+    }
+
+    #[test]
+    fn sixteen_bpp_partial_region_matches_the_full_frame() {
+        let frame = frame_from(&[0xF800, 0x8410]);
+        let region = frame
+            .region_color_image(Rect {
+                x: 1,
+                y: 0,
+                width: 1,
+                height: 1,
+            })
+            .expect("region");
+        assert_eq!(region.pixels[0], frame.to_color_image().pixels[1]);
+        assert!(
+            region.pixels[0].r() > 120,
+            "grey at x=1 collapsed: {:?}",
+            region.pixels[0]
+        );
     }
 }

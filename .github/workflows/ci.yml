@@ -13,11 +13,11 @@ jobs:
   # before any job runs, so the pipeline silently stops reporting. Lint them
   # explicitly (this is what caught `secrets` being used inside `if:`).
   workflows:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
       - name: Lint workflow files
-        uses: docker://rhysd/actionlint:1.7.7
+        uses: docker://rhysd/actionlint:1.7.9
         with:
           args: -color
 
@@ -57,7 +57,7 @@ jobs:
         run: ./scripts/build-app.sh release
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2

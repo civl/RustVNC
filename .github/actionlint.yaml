@@ -1,0 +1,10 @@
+# actionlint validates `runs-on:` against a list compiled into the binary, and
+# that list lags newly published GitHub-hosted images: even 1.7.9 knows
+# `macos-26` but not `ubuntu-26.04`, which the actions/runner-images README
+# documents as the label for the Ubuntu 26.04 image.
+#
+# Declaring it here keeps the linter strict about every other label instead of
+# turning the runner-label rule off.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

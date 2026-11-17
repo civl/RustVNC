@@ -21,6 +21,9 @@ use crate::protocol::{self, ControlMsg};
 use crate::tls;
 
 const PAIRING_TTL: Duration = Duration::from_secs(300);
+/// How long the control plane waits for the Core Audio tap before answering
+/// ServerHello without audio. Bounded because the tap needs a TCC prompt.
+const AUDIO_START_TIMEOUT: Duration = Duration::from_secs(3);
 const PAIRING_GLOBAL_ATTEMPTS: u32 = 5;
 const PAIRING_PER_IP_LIMIT: u32 = 5;
 const PAIRING_PER_IP_WINDOW: Duration = Duration::from_secs(600);
@@ -312,8 +315,15 @@ async fn handle_connection(
             let mut capabilities = 0u32;
 
             if audio_enabled && client_capabilities & protocol::CAP_AUDIO != 0 {
-                match AudioCapture::start(audio_tx) {
-                    Ok(capture) => {
+                // Creating the Core Audio tap can block while macOS shows the
+                // "System Audio Recording" prompt, and `ServerHello` must go out
+                // regardless: the client needs it for clipboard and keepalive.
+                // Run the tap setup on a blocking thread and bound the wait, so a
+                // pending permission dialog costs the audio feature — not the
+                // whole channel.
+                let start = tokio::task::spawn_blocking(move || AudioCapture::start(audio_tx));
+                match tokio::time::timeout(AUDIO_START_TIMEOUT, start).await {
+                    Ok(Ok(Ok(capture))) => {
                         let connection = connection.clone();
                         audio_forward = Some(tokio::spawn(async move {
                             while let Some(packet) = audio_rx.recv().await {
@@ -329,8 +339,17 @@ async fn handle_connection(
                         capabilities |= protocol::CAP_AUDIO;
                         info!("audio capture started for session");
                     }
-                    Err(err) => {
+                    Ok(Ok(Err(err))) => {
                         warn!("audio unavailable for session: {err:#}");
+                    }
+                    Ok(Err(join)) => {
+                        warn!("audio start task failed: {join}");
+                    }
+                    Err(_) => {
+                        warn!(
+                            "audio capture did not start within {AUDIO_START_TIMEOUT:?}; \
+                             continuing without audio (grant System Audio Recording permission)"
+                        );
                     }
                 }
             }

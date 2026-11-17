@@ -423,3 +423,61 @@ fn audio_datagrams_are_consumed_without_dropping_the_channel() {
     assert_eq!(echo.as_deref(), Some("mac:still-here"));
     session.stop();
 }
+
+/// A certificate that is not the one pinned at pairing time must be refused,
+/// even though TLS name verification is bypassed (the agent certificate only
+/// lists localhost while clients connect over LAN/Tailscale addresses).
+#[test]
+fn a_changed_agent_certificate_is_refused() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let agent = make_agent().expect("agent material");
+    let _enter = runtime.enter();
+    let endpoint = bind(&agent).expect("bind");
+    let addr = endpoint.local_addr().unwrap().to_string();
+    let _stub = runtime.spawn(run_stub(endpoint, agent.clone(), false));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_dir = dir.path().join("agent");
+    runtime
+        .block_on(pair(PairConfig {
+            addr: addr.clone(),
+            code: PAIR_CODE.to_string(),
+            client_name: "pin-test".to_string(),
+            state_dir: state_dir.clone(),
+            expect_fingerprint: None,
+        }))
+        .expect("pair");
+
+    // Simulate the agent's certificate having changed under us.
+    std::fs::write(
+        state_dir.join("server-fingerprint.txt"),
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .expect("rewrite pin");
+
+    let mut session = AgentSession::start(SessionConfig {
+        addr,
+        client_name: "pin-test".to_string(),
+        state_dir,
+        audio: false,
+    })
+    .expect("start session");
+
+    let error = wait_for(
+        &session,
+        std::time::Duration::from_secs(10),
+        |event| match event {
+            AgentEvent::Error(message) => Some(message.clone()),
+            _ => None,
+        },
+    );
+    let message = error.expect("expected an error for the changed certificate");
+    assert!(
+        message.contains("指纹") && message.contains("中间人"),
+        "error should name the fingerprint mismatch: {message}"
+    );
+    session.stop();
+}

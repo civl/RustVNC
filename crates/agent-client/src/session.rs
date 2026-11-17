@@ -25,6 +25,15 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const KEEPALIVE: Duration = Duration::from_secs(20);
 
+/// TLS server name used for QUIC.
+///
+/// The agent issues its certificate for `localhost` / `127.0.0.1` / `::1` only,
+/// but clients connect over whatever LAN or Tailscale address the Mac happens to
+/// have. Rather than chase a moving IP in the certificate, the client pins the
+/// exact certificate fingerprint at pairing time (see `state::AgentState`) and
+/// therefore only needs a name the certificate actually carries.
+const SERVER_NAME: &str = "localhost";
+
 #[derive(Debug, Clone)]
 pub struct PairConfig {
     /// `host:port`; the agent listens on 8443 unless it was reconfigured.
@@ -158,13 +167,13 @@ pub async fn pair(config: PairConfig) -> Result<PairOutcome> {
     let csr_pem = csr.pem().context("encode CSR")?;
 
     let remote = resolve(&config.addr).await?;
-    let server_name = host_of(&config.addr);
+    let server_name = SERVER_NAME;
     let mut endpoint =
         quinn::Endpoint::client("0.0.0.0:0".parse()?).context("create QUIC endpoint")?;
     endpoint.set_default_client_config(tls::pairing_client_config()?);
 
     let connecting = endpoint
-        .connect(remote, &server_name)
+        .connect(remote, server_name)
         .with_context(|| format!("connect to {remote}"))?;
     let connection = tokio::time::timeout(CONNECT_TIMEOUT, connecting)
         .await
@@ -214,6 +223,7 @@ pub async fn pair(config: PairConfig) -> Result<PairOutcome> {
                 &ca_cert_pem,
                 &client_cert_pem,
                 &key.serialize_pem(),
+                &server_fingerprint,
             )?;
             info!(fingerprint = %server_fingerprint, "paired with agent");
             let _ = send.finish();
@@ -320,7 +330,7 @@ async fn connect_and_run(
     tls::install_provider();
     let state = state::load(&config.state_dir)?;
     let remote = resolve(&config.addr).await?;
-    let server_name = host_of(&config.addr);
+    let server_name = SERVER_NAME;
 
     let mut endpoint =
         quinn::Endpoint::client("0.0.0.0:0".parse()?).context("create QUIC endpoint")?;
@@ -331,12 +341,25 @@ async fn connect_and_run(
     )?);
 
     let connecting = endpoint
-        .connect(remote, &server_name)
+        .connect(remote, server_name)
         .with_context(|| format!("connect to {remote}"))?;
     let connection = tokio::time::timeout(CONNECT_TIMEOUT, connecting)
         .await
         .map_err(|_| anyhow!("连接 {remote} 超时"))?
         .context("QUIC/TLS 握手失败（客户端证书是否已被 Agent 信任？）")?;
+
+    // The pin is the authentication here, not the certificate's name: see
+    // `SERVER_NAME`. A different certificate means either a re-installed agent
+    // (re-pair) or someone in the middle — either way the session stops.
+    let presented = tls::peer_fingerprint(&connection)
+        .ok_or_else(|| anyhow!("Agent 未出示证书，无法校验指纹"))?;
+    if !presented.eq_ignore_ascii_case(&state.server_fingerprint) {
+        bail!(
+            "Agent 证书指纹与配对时不一致，可能被中间人劫持：期望 {}，实际 {presented}。\
+             如果确实重装过 Agent，请重新配对。",
+            state.server_fingerprint
+        );
+    }
 
     let (mut send, mut recv) = connection.open_bi().await.context("open control stream")?;
     let wanted = if config.audio { protocol::CAP_AUDIO } else { 0 };
@@ -352,7 +375,19 @@ async fn connect_and_run(
 
     let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, protocol::read_msg(&mut recv))
         .await
-        .map_err(|_| anyhow!("等待 ServerHello 超时"))??;
+        .map_err(|_| {
+            // The agent answers ServerHello only after it has decided about
+            // audio; on macOS that can sit behind a TCC prompt.
+            if wanted & protocol::CAP_AUDIO != 0 {
+                anyhow!(
+                    "等待 ServerHello 超时：Agent 可能卡在“系统音频录制”权限上。\
+                     请在 Mac 的「系统设置 → 隐私与安全性」里允许 RustVNC Agent 录制系统音频，\
+                     或先在客户端关闭音频后重连。"
+                )
+            } else {
+                anyhow!("等待 ServerHello 超时（Agent 未响应）")
+            }
+        })??;
     let capabilities = match hello {
         ControlMsg::ServerHello {
             proto,
@@ -476,27 +511,4 @@ async fn resolve(addr: &str) -> Result<SocketAddr> {
     addresses
         .next()
         .ok_or_else(|| anyhow!("no address for {addr}"))
-}
-
-fn host_of(addr: &str) -> String {
-    if let Some(rest) = addr.strip_prefix('[')
-        && let Some(end) = rest.find(']')
-    {
-        return rest[..end].to_string();
-    }
-    addr.rsplit_once(':')
-        .map(|(host, _)| host.to_string())
-        .unwrap_or_else(|| addr.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::host_of;
-
-    #[test]
-    fn extracts_hosts() {
-        assert_eq!(host_of("127.0.0.1:8443"), "127.0.0.1");
-        assert_eq!(host_of("mac.local:8443"), "mac.local");
-        assert_eq!(host_of("[::1]:8443"), "::1");
-    }
 }

@@ -12,6 +12,14 @@ pub struct AgentState {
     pub ca_cert_pem: String,
     pub client_cert_pem: String,
     pub client_key_pem: String,
+    /// Fingerprint of the agent's server certificate, pinned at pairing time.
+    ///
+    /// The agent's certificate only carries `localhost`/`127.0.0.1`/`::1` while
+    /// clients reach it over a LAN or Tailscale address, so ordinary TLS name
+    /// verification cannot succeed. Pinning the exact certificate is stronger
+    /// than matching a name: the connection is accepted only for that one
+    /// certificate, and any substitution is refused with a MITM warning.
+    pub server_fingerprint: String,
 }
 
 /// `%APPDATA%/RustVNC/client/agent` (macOS: `~/Library/Application Support/...`).
@@ -43,6 +51,7 @@ pub fn load(dir: &Path) -> Result<AgentState> {
         ca_cert_pem: read("ca.pem")?,
         client_cert_pem: read("client-cert.pem")?,
         client_key_pem: read("client-key.pem")?,
+        server_fingerprint: read("server-fingerprint.txt")?.trim().to_string(),
     })
 }
 
@@ -51,16 +60,23 @@ pub fn save(
     ca_cert_pem: &str,
     client_cert_pem: &str,
     client_key_pem: &str,
+    server_fingerprint: &str,
 ) -> Result<()> {
     std::fs::create_dir_all(dir).context("create agent state dir")?;
     write_secret(&dir.join("ca.pem"), ca_cert_pem)?;
     write_secret(&dir.join("client-cert.pem"), client_cert_pem)?;
     write_secret(&dir.join("client-key.pem"), client_key_pem)?;
+    write_secret(&dir.join("server-fingerprint.txt"), server_fingerprint)?;
     Ok(())
 }
 
 pub fn forget(dir: &Path) -> Result<()> {
-    for name in ["ca.pem", "client-cert.pem", "client-key.pem"] {
+    for name in [
+        "ca.pem",
+        "client-cert.pem",
+        "client-key.pem",
+        "server-fingerprint.txt",
+    ] {
         match std::fs::remove_file(dir.join(name)) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -93,7 +109,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent");
         assert!(!is_paired(&path));
-        save(&path, "ca", "cert", "key").unwrap();
+        save(&path, "ca", "cert", "key", "fp").unwrap();
         assert!(is_paired(&path));
         let state = load(&path).unwrap();
         assert_eq!(state.ca_cert_pem, "ca");
@@ -108,7 +124,7 @@ mod tests {
     fn key_file_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        save(dir.path(), "ca", "cert", "key").unwrap();
+        save(dir.path(), "ca", "cert", "key", "fp").unwrap();
         let mode = std::fs::metadata(dir.path().join("client-key.pem"))
             .unwrap()
             .permissions()

@@ -53,7 +53,7 @@ Wrong password
 - 16bpp：正常，且修复了 `u8 * 255` 溢出导致的近黑画面。
 - Tight：macOS 不认；保留为可选，不默认请求。
 - Apple 私有编码：解码器按 `u16` 长度安全读取；1109/1110 已解析并写入诊断日志；
-  1104/1105 保留原始字节，未猜格式。
+  1104 解析矩形 hotspot/size；1105 用候选布局校验后记录 pixel size/scale/display id（未驱动视口）。
 - 未知编码：`UnsupportedEncoding(n)`，不可重试，避免重连风暴。
 
 ### 2.3 性能
@@ -83,7 +83,7 @@ Wrong password
 |---|---|
 | 真机键鼠注入与 P95 | 需人工按 ACCEPTANCE 执行；避免干扰正在使用的 Mac |
 | 10 分钟连续出画 | 已有 90 秒 soak；10 分钟待补 |
-| Apple 1104/1105 内容 | 1104 无 body/未在指针静止时出现；1105 单屏未发；需移动指针/多屏抓包后再解析 |
+| Apple 1105 字段顺序 | 候选布局已做校验与日志，但真实 1105 字节未抓到（单屏不出）；需移动指针/多屏抓包确认 |
 | 多 macOS 版本矩阵 | 当前仅 macOS 27.2 / Apple Silicon；14/15/26、Intel 未测 |
 | Tight/JPEG 质量旋钮 | macOS 不支持，归档为已知差异 |
 | Windows 真机输入/延迟 | 需 Windows 真机 + 凭据 |

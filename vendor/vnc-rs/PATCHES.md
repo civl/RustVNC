@@ -105,11 +105,15 @@ Conclusions:
 - After the Apple rectangles the session continued normally (256 rects, 51 fps in
   5 s), which is the empirical proof that no desync happens.
 
-`src/apple.rs` now decodes 1109 (`Keyboard`) and 1110 (`Machine`) and keeps 1105
-as raw bytes, because its field layout was not observed. The parser matches the
-*shape* of the payload (first printable ASCII run) rather than fixed offsets, and
-returns `Unknown` instead of inventing a string. The captured byte sequences are
-embedded in that module's tests.
+`src/apple.rs` now decodes 1109 (`Keyboard`), 1110 (`Machine`), 1104
+(`Cursor` geometry from the rectangle) and 1105 (`Display`). 1105's exact field
+order is still undocumented; the parser accepts the common
+`u16 width, u16 height, f64 BE scale, u32 BE display id` layout and a `u32`
+variant, validates every field (plausible size, finite scale in 0.5–8.0), keeps
+the raw body, and returns `Unknown` rather than inventing values. The client logs
+cursor hotspot/size and display pixel size/scale/id; nothing is applied to the
+viewport until a real capture confirms the ordering. Captured 1107/1109/1110
+byte sequences and synthetic 1105 candidates are embedded in tests.
 
 ## Also fixed here: the 5K framebuffer cap
 

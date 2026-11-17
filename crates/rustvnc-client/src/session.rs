@@ -632,6 +632,30 @@ async fn connect_and_loop(
                                 vnc::apple::AppleInfo::Capabilities(entries) => {
                                     tracing::debug!(count = entries.len(), "apple capabilities");
                                 }
+                                vnc::apple::AppleInfo::Cursor => {
+                                    tracing::info!(
+                                        hotspot_x = rect.x,
+                                        hotspot_y = rect.y,
+                                        width = rect.width,
+                                        height = rect.height,
+                                        "remote cursor geometry"
+                                    );
+                                }
+                                vnc::apple::AppleInfo::Display {
+                                    pixel_width,
+                                    pixel_height,
+                                    scale,
+                                    display_id,
+                                    ..
+                                } => {
+                                    tracing::info!(
+                                        pixel_width,
+                                        pixel_height,
+                                        scale,
+                                        display_id,
+                                        "remote display geometry"
+                                    );
+                                }
                                 other => tracing::debug!(
                                     code,
                                     width = rect.width,

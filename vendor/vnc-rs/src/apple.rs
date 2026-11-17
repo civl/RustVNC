@@ -17,12 +17,21 @@
 //! mis-drive the UI.
 
 /// What an Apple pseudo-encoding announcement carried.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AppleInfo {
     /// 1104: cursor shape is carried by the rectangle, body is empty.
     Cursor,
-    /// 1105: display geometry (pixel size, scale factor, display id).
-    Display { raw: Vec<u8> },
+    /// 1105: display geometry. The exact order is not documented by Apple; the
+    /// decoder accepts the common `u16 width, u16 height, f64 BE scale,
+    /// u32 BE display id` layout and a `u32` variant, validating every field
+    /// before exposing it. `raw` is always retained for diagnostics.
+    Display {
+        pixel_width: u16,
+        pixel_height: u16,
+        scale: f64,
+        display_id: u32,
+        raw: Vec<u8>,
+    },
     /// 1107: a capability list, four bytes per entry.
     Capabilities(Vec<[u8; 4]>),
     /// 1109: e.g. `com.apple.keylayout.ABC`.
@@ -77,12 +86,75 @@ pub fn parse(code: i32, body: &[u8]) -> AppleInfo {
                 raw: body.to_vec(),
             },
         },
-        APPLE_DISPLAY => AppleInfo::Display { raw: body.to_vec() },
+        APPLE_DISPLAY => parse_display(body),
         _ => AppleInfo::Unknown {
             code,
             raw: body.to_vec(),
         },
     }
+}
+
+fn parse_display(body: &[u8]) -> AppleInfo {
+    if let Some((pixel_width, pixel_height, scale, display_id)) = display_from_u16(body) {
+        return AppleInfo::Display {
+            pixel_width,
+            pixel_height,
+            scale,
+            display_id,
+            raw: body.to_vec(),
+        };
+    }
+    if let Some((pixel_width, pixel_height, scale, display_id)) = display_from_u32(body) {
+        return AppleInfo::Display {
+            pixel_width,
+            pixel_height,
+            scale,
+            display_id,
+            raw: body.to_vec(),
+        };
+    }
+    AppleInfo::Unknown {
+        code: APPLE_DISPLAY,
+        raw: body.to_vec(),
+    }
+}
+
+fn display_from_u16(body: &[u8]) -> Option<(u16, u16, f64, u32)> {
+    if body.len() < 16 {
+        return None;
+    }
+    let pixel_width = u16::from_be_bytes([body[0], body[1]]);
+    let pixel_height = u16::from_be_bytes([body[2], body[3]]);
+    let scale = f64::from_be_bytes(body[4..12].try_into().ok()?);
+    let display_id = u32::from_be_bytes(body[12..16].try_into().ok()?);
+    valid_display(pixel_width, pixel_height, scale, display_id)
+}
+
+fn display_from_u32(body: &[u8]) -> Option<(u16, u16, f64, u32)> {
+    if body.len() < 20 {
+        return None;
+    }
+    let pixel_width = u32::from_be_bytes(body[0..4].try_into().ok()?);
+    let pixel_height = u32::from_be_bytes(body[4..8].try_into().ok()?);
+    let scale = f64::from_be_bytes(body[8..16].try_into().ok()?);
+    let display_id = u32::from_be_bytes(body[16..20].try_into().ok()?);
+    if pixel_width > u16::MAX as u32 || pixel_height > u16::MAX as u32 {
+        return None;
+    }
+    valid_display(pixel_width as u16, pixel_height as u16, scale, display_id)
+}
+
+fn valid_display(
+    width: u16,
+    height: u16,
+    scale: f64,
+    display_id: u32,
+) -> Option<(u16, u16, f64, u32)> {
+    let plausible = (320..=32768).contains(&width)
+        && (200..=32768).contains(&height)
+        && scale.is_finite()
+        && (0.5..=8.0).contains(&scale);
+    plausible.then_some((width, height, scale, display_id))
 }
 
 /// The first run of printable ASCII of at least `min` bytes.
@@ -169,9 +241,44 @@ mod tests {
         ));
         assert!(matches!(
             parse(APPLE_DISPLAY, CAPTURED_1110),
-            AppleInfo::Display { .. }
+            AppleInfo::Unknown { .. }
         ));
         assert_eq!(parse(APPLE_CURSOR, &[]), AppleInfo::Cursor);
+    }
+
+    #[test]
+    fn parses_a_candidate_display_geometry_layout() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1920u16.to_be_bytes());
+        body.extend_from_slice(&1080u16.to_be_bytes());
+        body.extend_from_slice(&2.0f64.to_be_bytes());
+        body.extend_from_slice(&0x1234_5678u32.to_be_bytes());
+        let AppleInfo::Display {
+            pixel_width,
+            pixel_height,
+            scale,
+            display_id,
+            ..
+        } = parse(APPLE_DISPLAY, &body)
+        else {
+            panic!("expected display geometry");
+        };
+        assert_eq!((pixel_width, pixel_height), (1920, 1080));
+        assert_eq!(scale, 2.0);
+        assert_eq!(display_id, 0x1234_5678);
+    }
+
+    #[test]
+    fn rejects_implausible_display_geometry() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u16.to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes());
+        body.extend_from_slice(&0.0f64.to_be_bytes());
+        body.extend_from_slice(&1u32.to_be_bytes());
+        assert!(matches!(
+            parse(APPLE_DISPLAY, &body),
+            AppleInfo::Unknown { .. }
+        ));
     }
 
     #[test]

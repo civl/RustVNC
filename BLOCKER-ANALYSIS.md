@@ -13,14 +13,13 @@
 | P0-1 | 空闲烧 100% 单核 | ✅ 已修 | `session.rs` 改用 `recv_event()`；`tests/idle_cost.rs` 实测 **0.000s / 3s**（CI 每轮跑） |
 | P0-2 | 输入：Ctrl 变 ⌃⌘、Cmd 发不出、修饰键不连续 | ✅ 已修 | `ModifierState` 状态机 + `mac_cmd`；特殊键菜单；4 个单测 |
 | P0-3 | 未知编码致命 + 缺 zlib/Apple 编码 | ✅ 已修 | `vendor/vnc-rs`（见其 `PATCHES.md`）；`tests/encoding_compat.rs` 3 例 |
-| P0-4 | SSH 首次信任、密码、stderr | ⚠️ 部分 | 指纹探测+显式信任、stderr 透出、密钥生成 ✅；**Windows 密码认证仍不可用**（系统 OpenSSH 无 askpass），已改为明确报错+引导 |
+| P0-4 | SSH 首次信任、密码、stderr | ✅ 已修 | 指纹探测+显式信任、stderr 透出、密钥生成；密码通过 `SSH_ASKPASS` 指向客户端自身（Unix 8.4+ / Windows 8.6+） |
 | P0-5 | 双引擎客户端侧 0 行 | ✅ 已实现 | 新增 `crates/agent-client`（配对/剪贴板/Opus→WASAPI）；`tests/agent_loopback.rs` 真实 QUIC 回环，本机实测出声 |
 | P0-6 | Agent 签名 / 仓库卫生 | ✅ 已修 | `resources/RustVNCAgent.entitlements`、`scripts/build-app.sh`（hardened runtime）、`scripts/notarize.sh`、`packaging/windows/sign.ps1`、`.gitattributes`、CI 拆分 |
 | P0-7 | 无法验收 | ⚠️ 部分 | 自动化靶场 ✅（`scripts/acceptance.ps1`，本次全部 PASSED）；真机 6 项仍待你执行，清单见 `ACCEPTANCE.md` |
 
-> 仍未解决的两项（都不阻塞日常使用，且已在 README「已知限制」中写明）：
-> Windows 的 SSH 密码认证（需换 `russh` 进程内实现）、Apple 私有编码的**内容**解析
-> （需真机抓包确认字节布局；目前只做安全跳过，默认不请求）。
+> 仍未解决的一项：Apple 私有编码的**内容**解析（1104/1105 需真机抓包；1109/1110 已解析）。
+> 真机输入/时延与 10/30 分钟 soak 仍按 ACCEPTANCE 人工执行。
 
 ---
 

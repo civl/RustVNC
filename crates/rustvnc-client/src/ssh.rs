@@ -91,7 +91,7 @@ impl Drop for SshTunnel {
 fn ssh_exit_error(reason: String, stderr: &str) -> anyhow::Error {
     let stderr = stderr.trim();
     let hint = if stderr.contains("Permission denied") {
-        "（认证失败：确认用户名/密钥；密码认证请改用密钥，见「生成密钥」）"
+        "（认证失败：确认用户名/密钥。密码认证需要 OpenSSH 8.4+（Windows 需 8.6+ 支持 SSH_ASKPASS_REQUIRE）；仍失败请改用密钥）"
     } else if stderr.contains("Host key verification failed") {
         "（主机密钥校验失败：请重新探测并核对指纹）"
     } else {
@@ -135,28 +135,24 @@ fn build_command(
         // Never prompt: an unanswered prompt looks like a hang.
         command.arg("-o").arg("BatchMode=yes");
     } else if !ssh.password.is_empty() {
-        // ssh cannot be fed a password on stdin. On Unix it can ask an askpass
-        // helper; the Windows OpenSSH build has no askpass support at all, so
-        // say that plainly instead of hanging on a prompt nobody can see.
-        #[cfg(windows)]
-        bail!(
-            "Windows 自带 OpenSSH 不支持非交互密码认证：请改用密钥（点「生成密钥」），或先在终端手动执行一次 ssh 登录。\n\
-             (Windows OpenSSH cannot take a password non-interactively; use a key instead.)"
-        );
-        #[cfg(not(windows))]
-        {
-            command.arg("-o").arg("BatchMode=no");
-            command
-                .arg("-o")
-                .arg("PreferredAuthentications=password,keyboard-interactive");
-            let helper = write_askpass_helper()?;
-            command.env("SSH_ASKPASS", &helper);
-            command.env("SSH_ASKPASS_REQUIRE", "force");
-            command.env("DISPLAY", ":0");
-            // The helper reads the secret from its own environment so it never
-            // touches the filesystem.
-            command.env("RUSTVNC_SSH_PASSWORD", &ssh.password);
-        }
+        // OpenSSH cannot be fed a password on stdin. Point SSH_ASKPASS at this
+        // executable with a dedicated mode; the child reads the secret from its
+        // environment and writes it to stdout. OpenSSH 8.4+ honours
+        // SSH_ASKPASS_REQUIRE=force (Win32-OpenSSH needs 8.6+).
+        command.arg("-o").arg("BatchMode=no");
+        command
+            .arg("-o")
+            .arg("PreferredAuthentications=password,keyboard-interactive");
+        let askpass = std::env::current_exe().context("locate rustvnc-client for SSH_ASKPASS")?;
+        command.env("SSH_ASKPASS", askpass);
+        command.env("SSH_ASKPASS_REQUIRE", "force");
+        // OpenSSH invokes the helper with the prompt as an argument, so signal
+        // the mode through the environment instead of a flag.
+        command.env("RUSTVNC_SSH_ASKPASS", "1");
+        command.env("DISPLAY", ":0");
+        // The helper reads the secret from its own environment so it never
+        // touches the filesystem.
+        command.env("RUSTVNC_SSH_PASSWORD", &ssh.password);
     } else {
         command.arg("-o").arg("BatchMode=yes");
     }
@@ -189,20 +185,6 @@ fn keyscan_binary() -> String {
 
 fn keygen_binary() -> String {
     std::env::var("RUSTVNC_SSH_KEYGEN_BIN").unwrap_or_else(|_| "ssh-keygen".to_string())
-}
-
-#[cfg(not(windows))]
-fn write_askpass_helper() -> Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let path = std::env::temp_dir().join("rustvnc-askpass.sh");
-    std::fs::write(
-        &path,
-        "#!/bin/sh\nprintf '%s\\n' \"$RUSTVNC_SSH_PASSWORD\"\n",
-    )
-    .context("write askpass helper")?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-        .context("chmod askpass helper")?;
-    Ok(path)
 }
 
 pub fn known_hosts_path(ssh: &SshConfig) -> PathBuf {
@@ -497,6 +479,48 @@ mod tests {
             "{args:?}"
         );
         assert!(args.contains(&"me@mac.local".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn password_auth_uses_self_as_askpass() {
+        let ssh = SshConfig {
+            user: "me".to_string(),
+            port: 2222,
+            key_path: String::new(),
+            known_hosts: "/home/me/.ssh/known_hosts".to_string(),
+            password: "s3cret".to_string(),
+        };
+        let command = build_command(
+            &ssh,
+            "mac.local",
+            5900,
+            Path::new("/home/me/.ssh/known_hosts"),
+            "127.0.0.1:5000",
+        )
+        .unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"BatchMode=no".to_string()), "{args:?}");
+        let envs: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let value = |name: &str| {
+            envs.iter()
+                .find(|(key, _)| key == name)
+                .and_then(|(_, value)| value.clone())
+        };
+        assert_eq!(value("SSH_ASKPASS_REQUIRE").as_deref(), Some("force"));
+        assert_eq!(value("RUSTVNC_SSH_ASKPASS").as_deref(), Some("1"));
+        assert_eq!(value("RUSTVNC_SSH_PASSWORD").as_deref(), Some("s3cret"));
+        assert!(value("SSH_ASKPASS").is_some(), "{envs:?}");
     }
 
     #[test]

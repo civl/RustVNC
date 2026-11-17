@@ -70,6 +70,17 @@ fn wgpu_configuration(backends: wgpu::Backends) -> eframe::egui_wgpu::WgpuConfig
 }
 
 fn main() -> eframe::Result {
+    // OpenSSH invokes SSH_ASKPASS without a terminal; use this same binary as
+    // the helper and keep the secret in the child's environment.
+    if std::env::var_os("RUSTVNC_SSH_ASKPASS").is_some()
+        || std::env::args().nth(1).as_deref() == Some("--ssh-askpass")
+    {
+        if let Ok(password) = std::env::var("RUSTVNC_SSH_PASSWORD") {
+            println!("{password}");
+        }
+        return Ok(());
+    }
+
     let _log_guard = rustvnc_client::diag::init_tracing();
 
     let mut last_error = Ok(());

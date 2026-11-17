@@ -46,9 +46,9 @@ Windows 客户端 ── RFB/SSH (5900) ──────────► macOS 
 
 ### 已知限制
 
-- **SSH 密码认证在 Windows 上不可用**：Windows 自带 OpenSSH 不支持非交互
-  `askpass`，客户端会明确报错并引导改用密钥（提供一键生成 ed25519 密钥 +
-  `authorized_keys` 安装指引）。真正的进程内 SSH（`russh`）尚未实现。
+- **SSH 密码认证需要新版 OpenSSH**：现在通过 `SSH_ASKPASS`（客户端自身以
+  `--ssh-askpass` 模式运行）支持密码，Unix 需 OpenSSH 8.4+、Windows 需 8.6+；
+  旧版仍会明确提示改用密钥（提供一键生成 ed25519 密钥 + `authorized_keys` 指引）。
 - **Apple 私有编码的内容未解析**：默认不请求（配置里可开“Apple 扩展”），
   只有真机抓包确认 1105/1109 的字节布局后才有意义。
 - **真机指标未测**：1080p 30 分钟稳定性、帧率、输入 P95 需要一台可连的 Mac +

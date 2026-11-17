@@ -115,7 +115,7 @@ cargo test --workspace
 | 真机指标 | 帧率/延迟/30 分钟稳定性/登录窗口 | **需要你的 Mac + Windows 真机**，见 ACCEPTANCE.md |
 | Apple 私有编码内容 | 只做安全跳过；1105 缩放、1109 布局未解析 | 抓到真机数据后解析 |
 | 远端光标形状 | ✅ 32bpp 下渲染远端形状（热点+掩码已处理）；16bpp 不请求光标编码，仍用本地指针 | 16bpp 需服务端按 16bpp 发送光标，未验证 |
-| SSH 密码认证（Windows） | 系统 OpenSSH 无 askpass；已明确报错 + 引导密钥 | 可选：换 `russh` 进程内实现 |
+| SSH 密码认证（Windows） | ✅ `SSH_ASKPASS` 指向客户端自身；OpenSSH 8.6+ 可用，旧版提示密钥 | 已完成（依赖系统版本） |
 | 多显示器 / HiDPI | 未实现 | M2 |
 | 自适应画质 | 快环已做：静止画面自动降到 4 fps（`FramePacer`），一有像素立刻恢复设定帧率，HUD 显示「静止降频」；慢环（按带宽/丢包调画质）仍是 M2 | 慢环 M2 |
 | 渲染后端 | OpenGL(glow)，非 D3D11；无 WARP 回退 | M2 |

@@ -150,6 +150,8 @@ struct App {
     /// client can send real transitions instead of re-deriving them per key,
     /// which is what makes Ctrl+click and Shift+drag work.
     sent_modifiers: ModifierState,
+    /// The remote pointer shape, when the server sends one.
+    remote_cursor: Option<RemoteCursor>,
     /// A `FramebufferUpdate` has been fully decoded and is ready to present.
     frame_complete: bool,
     /// When the first rectangle of the pending frame arrived.
@@ -284,6 +286,7 @@ impl App {
             last_remote_clipboard: None,
             last_clipboard_poll: Instant::now(),
             sent_modifiers: ModifierState::default(),
+            remote_cursor: None,
             frame_complete: false,
             first_pending: None,
             fullscreen: false,
@@ -683,6 +686,13 @@ impl App {
                     self.first_pending.get_or_insert_with(Instant::now);
                     self.frame_dirty = true;
                 }
+                SessionEvent::Cursor {
+                    hotspot,
+                    size,
+                    rgba,
+                } => {
+                    self.remote_cursor = RemoteCursor::new(ctx, hotspot, size, &rgba);
+                }
                 SessionEvent::FrameComplete => {
                     // Everything that belongs to this update is in the frame
                     // buffer now; present it in one go instead of sweeping.
@@ -854,6 +864,46 @@ impl App {
             response.request_focus();
         }
         self.image_rect = Some(response.rect);
+        self.paint_remote_cursor(ui, ctx);
+    }
+
+    /// Replace the local pointer with the remote shape while it is over the
+    /// remote screen; otherwise two arrows would be drawn on top of each other.
+    fn paint_remote_cursor(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some(image_rect) = self.image_rect else {
+            return;
+        };
+        let hovering = ctx
+            .input(|input| input.pointer.hover_pos())
+            .is_some_and(|position| image_rect.contains(position));
+        let shape = if hovering {
+            self.remote_cursor.as_ref()
+        } else {
+            None
+        };
+        let Some(cursor) = shape else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+            return;
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
+        let Some((x, y, _)) = self.last_pointer else {
+            return;
+        };
+        let rect = cursor_screen_rect(
+            image_rect,
+            (self.frame.width, self.frame.height),
+            (x, y),
+            cursor.hotspot,
+            cursor.size,
+        );
+        let clip = ui.clip_rect();
+        ui.set_clip_rect(image_rect);
+        egui::Image::new(egui::load::SizedTexture::new(
+            cursor.texture.id(),
+            rect.size(),
+        ))
+        .paint_at(ui, rect);
+        ui.set_clip_rect(clip);
     }
 
     fn form_ui(&mut self, ui: &mut egui::Ui) {
@@ -1497,6 +1547,11 @@ impl eframe::App for App {
         // Immersive mode only makes sense while a session is being displayed.
         // Disconnecting (or a session that ended on its own) must also restore
         // the window, or the user is left with an empty fullscreen window.
+        // A session that ended on its own must hand the pointer back.
+        if self.session.is_none() && self.remote_cursor.is_some() {
+            self.remote_cursor = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+        }
         if self.fullscreen && self.session.is_none() {
             self.fullscreen = false;
             self.fullscreen_hint = None;
@@ -1592,6 +1647,75 @@ impl eframe::App for App {
 /// result is shown anyway. Servers answer every request, so this is only a
 /// safety net, not the normal path.
 const PARTIAL_FRAME_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// The remote pointer shape, painted over the framebuffer while the mouse is
+/// over the remote screen. Without it the local Windows arrow is the only
+/// feedback, so an I-beam or resize cursor never shows up.
+struct RemoteCursor {
+    texture: egui::TextureHandle,
+    hotspot: (u16, u16),
+    size: (u16, u16),
+}
+
+impl RemoteCursor {
+    fn new(
+        ctx: &egui::Context,
+        hotspot: (u16, u16),
+        size: (u16, u16),
+        bgra: &[u8],
+    ) -> Option<Self> {
+        let rgba = bgra_to_rgba(bgra, size)?;
+        let image =
+            egui::ColorImage::from_rgba_unmultiplied([size.0 as usize, size.1 as usize], &rgba);
+        let texture = ctx.load_texture("remote-cursor", image, egui::TextureOptions::NEAREST);
+        Some(Self {
+            texture,
+            hotspot,
+            size,
+        })
+    }
+}
+
+/// The engine hands cursor pixels back in the negotiated 32 bpp order (BGRA for
+/// us) with the server's mask already written into the alpha byte.
+fn bgra_to_rgba(bgra: &[u8], size: (u16, u16)) -> Option<Vec<u8>> {
+    let (width, height) = (size.0 as usize, size.1 as usize);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let pixels = width * height;
+    if bgra.len() < pixels * 4 {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity(pixels * 4);
+    for pixel in bgra.as_chunks::<4>().0.iter().take(pixels) {
+        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    Some(rgba)
+}
+
+/// Where the remote cursor belongs on screen, in points.
+///
+/// `remote_pointer` is the position last sent to the server, so the shape tracks
+/// exactly what the remote is doing rather than the local pointer, which may be
+/// a frame ahead of the pixels.
+fn cursor_screen_rect(
+    image_rect: egui::Rect,
+    framebuffer: (usize, usize),
+    remote_pointer: (u16, u16),
+    hotspot: (u16, u16),
+    size: (u16, u16),
+) -> egui::Rect {
+    let scale = image_rect.width() / framebuffer.0.max(1) as f32;
+    let origin = egui::pos2(
+        image_rect.min.x + (f32::from(remote_pointer.0) - f32::from(hotspot.0)) * scale,
+        image_rect.min.y + (f32::from(remote_pointer.1) - f32::from(hotspot.1)) * scale,
+    );
+    egui::Rect::from_min_size(
+        origin,
+        egui::vec2(f32::from(size.0) * scale, f32::from(size.1) * scale),
+    )
+}
 
 fn is_special_key(key: egui::Key) -> bool {
     matches!(
@@ -1951,5 +2075,47 @@ mod renderer_tests {
         }
         // SAFETY: restore the shared environment for any later test.
         unsafe { std::env::remove_var("RUSTVNC_RENDERER") };
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn bgra_pixels_become_rgba_with_the_mask_alpha() {
+        // Two pixels: blue-ish opaque, red-ish transparent (mask already applied).
+        let bgra = vec![
+            0xff, 0x00, 0x00, 0xff, // B=255 G=0 R=0 A=255
+            0x00, 0x00, 0xff, 0x00, // B=0 G=0 R=255 A=0
+        ];
+        let rgba = bgra_to_rgba(&bgra, (2, 1)).expect("convert");
+        assert_eq!(rgba, vec![0x00, 0x00, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn malformed_cursor_data_is_rejected() {
+        assert!(bgra_to_rgba(&[], (0, 0)).is_none());
+        assert!(bgra_to_rgba(&[1, 2, 3, 4], (2, 2)).is_none(), "short body");
+    }
+
+    /// Placement must follow the *sent* pointer position and the hotspot, so the
+    /// shape lands where clicks go.
+    #[test]
+    fn cursor_is_placed_by_hotspot_at_display_scale() {
+        let image = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(800.0, 450.0));
+        // 1600x900 framebuffer shown at 800x450 => scale 0.5.
+        let rect = cursor_screen_rect(image, (1600, 900), (400, 300), (2, 2), (24, 24));
+        assert!((rect.min.x - 299.0).abs() < 0.01, "x = {}", rect.min.x);
+        assert!((rect.min.y - 199.0).abs() < 0.01, "y = {}", rect.min.y);
+        assert!((rect.width() - 12.0).abs() < 0.01, "w = {}", rect.width());
+        assert!((rect.height() - 12.0).abs() < 0.01, "h = {}", rect.height());
+    }
+
+    #[test]
+    fn a_zero_sized_framebuffer_does_not_divide_by_zero() {
+        let image = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0));
+        let rect = cursor_screen_rect(image, (0, 0), (5, 5), (0, 0), (10, 10));
+        assert!(rect.min.x.is_finite() && rect.width().is_finite());
     }
 }

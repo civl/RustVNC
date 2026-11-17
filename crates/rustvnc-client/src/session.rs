@@ -91,6 +91,14 @@ pub enum SessionEvent {
     },
     /// One `FramebufferUpdate` has been fully decoded: the UI may present.
     FrameComplete,
+    /// The remote pointer shape. `size` is zero when the server clears it, in
+    /// which case `rgba` is empty.
+    Cursor {
+        hotspot: (u16, u16),
+        size: (u16, u16),
+        /// BGRA with an alpha byte, matching the negotiated 32 bpp format.
+        rgba: Vec<u8>,
+    },
     Clipboard(String),
     Stats {
         fps: f64,
@@ -435,7 +443,14 @@ async fn connect_and_loop(
                             frames += 1;
                             let _ = events.send(SessionEvent::FrameComplete);
                         }
-                        VncEvent::SetCursor(_, _) | VncEvent::Bell => {}
+                        VncEvent::SetCursor(rect, rgba) => {
+                            let _ = events.send(SessionEvent::Cursor {
+                                hotspot: (rect.x, rect.y),
+                                size: (rect.width, rect.height),
+                                rgba,
+                            });
+                        }
+                        VncEvent::Bell => {}
                         VncEvent::AppleEncoding { code, rect, body } => {
                             // Parsed and bounded by the engine. Surfaced in the
                             // diagnostics log: the layout/machine are exactly what

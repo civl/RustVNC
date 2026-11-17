@@ -89,6 +89,8 @@ pub enum SessionEvent {
         dst: Rect,
         src: Rect,
     },
+    /// One `FramebufferUpdate` has been fully decoded: the UI may present.
+    FrameComplete,
     Clipboard(String),
     Stats {
         fps: f64,
@@ -369,8 +371,11 @@ async fn connect_and_loop(
     let mut height = 0usize;
     let mut rects = 0u64;
     let mut bytes = 0u64;
+    // Frames, not rectangles: with 5K ZRLE a single update contains dozens of
+    // rectangles, so counting them reported absurd numbers like "4619 fps".
+    let mut frames = 0u64;
+    let mut last_frames = 0u64;
     let mut last_stats = Instant::now();
-    let mut last_rects = 0u64;
     let interval = Duration::from_millis(1000 / u64::from(config.fps().max(1)));
     // Exactly one FramebufferUpdateRequest may be outstanding: sending the next
     // one while the previous update is still streaming makes the server interleave
@@ -427,6 +432,8 @@ async fn connect_and_loop(
                         }
                         VncEvent::UpdateComplete => {
                             update_in_flight = false;
+                            frames += 1;
+                            let _ = events.send(SessionEvent::FrameComplete);
                         }
                         VncEvent::SetCursor(_, _) | VncEvent::Bell => {}
                         VncEvent::AppleEncoding { code, rect, body } => {
@@ -512,10 +519,10 @@ async fn connect_and_loop(
                 }
                 if last_stats.elapsed() >= Duration::from_secs(1) {
                     let elapsed = last_stats.elapsed().as_secs_f64().max(0.001);
-                    let fps = (rects - last_rects) as f64 / elapsed;
+                    let fps = (frames - last_frames) as f64 / elapsed;
                     let _ = events.send(SessionEvent::Stats { fps, rects, bytes });
                     last_stats = Instant::now();
-                    last_rects = rects;
+                    last_frames = frames;
                 }
             }
         }

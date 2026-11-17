@@ -90,6 +90,9 @@ cargo test --workspace
 
 > 根包 `rustvnc-agent` 是 macOS-only，所以 Windows 上 `cargo check --workspace`
 > 会失败；CI 按平台拆成 `macos` 与 `windows-client` 两个 job。
+>
+> 客户端请用 **release** 运行：5K 画面下 debug 构建的解码慢到肉眼可见（拖窗口像在扫屏），
+> `cargo build --release -p rustvnc-client` 后再跑。
 
 一键验收：
 

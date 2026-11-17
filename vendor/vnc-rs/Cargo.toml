@@ -27,7 +27,6 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "An async implementation of VNC client side protocol"
-homepage = "https://github.com/HsuJv/vnc-rs"
 documentation = "https://docs.rs/vnc-rs"
 readme = "README.md"
 keywords = ["vnc"]

@@ -61,7 +61,10 @@ this is not something that can be fixed by waiting.
 
 8. **`Cargo.toml`** — removed the `[profile.release]` block (non-root workspace
    members cannot set profiles); `.cargo_vcs_info.json`, `Cargo.lock` and
-   `.github/` dropped from the vendored copy.
+   `.github/` dropped from the vendored copy. `package.homepage` dropped as well:
+   it duplicates `package.repository`, which cargo warns about
+   (`cargo::redundant_homepage`). `Cargo.toml.orig` is left untouched as the
+   upstream reference copy.
 
 ## Apple body layout — verified on a real Mac (2026-11-17)
 

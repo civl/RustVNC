@@ -150,6 +150,10 @@ struct App {
     /// client can send real transitions instead of re-deriving them per key,
     /// which is what makes Ctrl+click and Shift+drag work.
     sent_modifiers: ModifierState,
+    /// A `FramebufferUpdate` has been fully decoded and is ready to present.
+    frame_complete: bool,
+    /// When the first rectangle of the pending frame arrived.
+    first_pending: Option<Instant>,
     /// Fullscreen hides the chrome and lets the remote image fill the screen.
     fullscreen: bool,
     /// When to stop showing the "press F11 to exit" hint.
@@ -280,6 +284,8 @@ impl App {
             last_remote_clipboard: None,
             last_clipboard_poll: Instant::now(),
             sent_modifiers: ModifierState::default(),
+            frame_complete: false,
+            first_pending: None,
             fullscreen: false,
             fullscreen_hint: None,
             host_key_probe: None,
@@ -674,11 +680,19 @@ impl App {
                         self.error = Some(format!("frame: {err:#}"));
                     }
                     self.pending_rects.push(rect);
+                    self.first_pending.get_or_insert_with(Instant::now);
                     self.frame_dirty = true;
+                }
+                SessionEvent::FrameComplete => {
+                    // Everything that belongs to this update is in the frame
+                    // buffer now; present it in one go instead of sweeping.
+                    self.frame_complete = true;
+                    ctx.request_repaint();
                 }
                 SessionEvent::Copy { dst, src } => {
                     let _ = self.frame.copy_rect(dst, src);
                     self.pending_rects.push(dst);
+                    self.first_pending.get_or_insert_with(Instant::now);
                     self.frame_dirty = true;
                 }
                 SessionEvent::Clipboard(text) => {
@@ -728,6 +742,18 @@ impl App {
         if !self.frame_dirty || self.frame.width == 0 || self.frame.height == 0 {
             return;
         }
+        // Present whole frames only. macOS sends a 5K update as a sequence of
+        // rectangles, and uploading each one as it lands paints the screen top
+        // to bottom — the "scanning" the user sees while dragging a window.
+        // `FrameComplete` arrives when the batch is fully decoded; the timeout
+        // keeps partial feedback for servers that never finish a batch.
+        let complete = self.frame_complete
+            || self
+                .first_pending
+                .is_some_and(|at| at.elapsed() > PARTIAL_FRAME_TIMEOUT);
+        if !complete {
+            return;
+        }
         let size = (self.frame.width, self.frame.height);
         let recreate = self.texture.is_none() || self.last_texture_size != size;
         if recreate {
@@ -748,6 +774,8 @@ impl App {
             }
         }
         self.frame_dirty = false;
+        self.frame_complete = false;
+        self.first_pending = None;
     }
 
     fn session_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, chrome: bool) {
@@ -1559,6 +1587,11 @@ impl eframe::App for App {
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 }
+
+/// Longest a half-received frame may hold the display back before the partial
+/// result is shown anyway. Servers answer every request, so this is only a
+/// safety net, not the normal path.
+const PARTIAL_FRAME_TIMEOUT: Duration = Duration::from_millis(250);
 
 fn is_special_key(key: egui::Key) -> bool {
     matches!(

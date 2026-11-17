@@ -84,6 +84,13 @@ pub enum VncEvent {
         rect: Rect,
         body: Vec<u8>,
     },
+    /// One complete `FramebufferUpdate` has been decoded.
+    ///
+    /// The rectangles of a single update can land over many milliseconds; a
+    /// client that paints each one as it arrives shows a half-updated screen,
+    /// and one that requests the next update before this marker has a queue of
+    /// overlapping updates. Both effects look like tearing.
+    UpdateComplete,
     /// Just ring a bell
     ///
     Bell,

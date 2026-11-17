@@ -204,6 +204,12 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 /// next failure starts the backoff over. Shorter-lived connections keep
 /// climbing the backoff instead of retrying once per second forever.
 const STABLE_SESSION: Duration = Duration::from_secs(10);
+/// Give up waiting for an in-flight frame after this long and request again.
+///
+/// Deliberately not derived from the frame interval: a 5K ZRLE frame over a slow
+/// link can legitimately take far longer than a few frames, and re-arming early
+/// would silently restore the overlapping-request behaviour this guards against.
+const FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 
 async fn run_session(
     target: String,
@@ -366,6 +372,11 @@ async fn connect_and_loop(
     let mut last_stats = Instant::now();
     let mut last_rects = 0u64;
     let interval = Duration::from_millis(1000 / u64::from(config.fps().max(1)));
+    // Exactly one FramebufferUpdateRequest may be outstanding: sending the next
+    // one while the previous update is still streaming makes the server interleave
+    // updates, which shows up as tearing / jelly while windows move.
+    let mut update_in_flight = false;
+    let mut in_flight_since = Instant::now();
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -413,6 +424,9 @@ async fn connect_and_loop(
                         VncEvent::Copy(dst, src) => {
                             rects += 1;
                             let _ = events.send(SessionEvent::Copy { dst, src });
+                        }
+                        VncEvent::UpdateComplete => {
+                            update_in_flight = false;
                         }
                         VncEvent::SetCursor(_, _) | VncEvent::Bell => {}
                         VncEvent::AppleEncoding { code, rect, body } => {
@@ -477,14 +491,24 @@ async fn connect_and_loop(
                 }
             }
             _ = ticker.tick() => {
-                if let Err(err) = client.input(X11Event::Refresh).await {
-                    let failure = SessionFailure::from_vnc(err).after_connect();
-                    let _ = events.send(SessionEvent::Error {
-                        code: failure.code,
-                        message: failure.message.clone(),
-                        retryable: failure.retryable,
-                    });
-                    return Err(failure);
+                // A lost update must not stall the session forever: after a few
+                // intervals without the marker, re-arm and try again.
+                if update_in_flight && in_flight_since.elapsed() > FRAME_TIMEOUT {
+                    tracing::debug!("frame did not complete in time; re-arming refresh");
+                    update_in_flight = false;
+                }
+                if !update_in_flight {
+                    update_in_flight = true;
+                    in_flight_since = Instant::now();
+                    if let Err(err) = client.input(X11Event::Refresh).await {
+                        let failure = SessionFailure::from_vnc(err).after_connect();
+                        let _ = events.send(SessionEvent::Error {
+                            code: failure.code,
+                            message: failure.message.clone(),
+                            retryable: failure.retryable,
+                        });
+                        return Err(failure);
+                    }
                 }
                 if last_stats.elapsed() >= Duration::from_secs(1) {
                     let elapsed = last_stats.elapsed().as_secs_f64().max(0.001);

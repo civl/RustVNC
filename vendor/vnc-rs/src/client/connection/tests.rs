@@ -139,7 +139,13 @@ async fn raw_is_implicit_and_resize_changes_decoder_bounds() {
     )
     .await;
     assert!(matches!(result, Err(VncError::IoError(_))));
-    let output = output.into_inner().unwrap();
+    // Drop the pacing markers so the assertion stays about the decoded events.
+    let output: Vec<_> = output
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .filter(|event| !matches!(event, VncEvent::UpdateComplete))
+        .collect();
     assert!(
         matches!(&output[0], VncEvent::SetResolution(size) if (size.width, size.height) == (128, 96))
     );

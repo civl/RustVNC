@@ -158,6 +158,9 @@ pub struct ClientConfig {
     pub auth: AuthMode,
     pub quality: QualityPreset,
     pub bpp: u8,
+    /// Frame-rate cap for the custom preset (5-60). Presets ignore it.
+    #[serde(default = "default_custom_fps")]
+    pub custom_fps: u32,
     pub encoding: EncodingPreference,
     /// Advertise Apple's private pseudo-encodings (1104/1105/1107/1109/1110).
     ///
@@ -183,6 +186,7 @@ impl Default for ClientConfig {
             auth: AuthMode::Auto,
             quality: QualityPreset::High,
             bpp: 32,
+            custom_fps: default_custom_fps(),
             encoding: EncodingPreference::Zrle,
             apple_encodings: false,
             agent: AgentConfig::default(),
@@ -192,10 +196,14 @@ impl Default for ClientConfig {
     }
 }
 
+fn default_custom_fps() -> u32 {
+    30
+}
+
 impl ClientConfig {
     pub fn fps(&self) -> u32 {
         match self.quality {
-            QualityPreset::Custom => 30,
+            QualityPreset::Custom => self.custom_fps.clamp(5, 60),
             other => other.defaults().2,
         }
     }

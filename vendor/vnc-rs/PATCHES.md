@@ -119,6 +119,20 @@ and reports an empty shape instead of failing. Two regression tests cover it
 `thirty_two_bpp_cursor_still_decodes`), and the client no longer advertises
 `CursorPseudo` at 16 bpp, because the UI draws the local pointer anyway and
 those updates would only cost bandwidth.
+## `VncEvent::UpdateComplete`
+
+The decoder reads a `FramebufferUpdate` rectangle by rectangle and emitted one
+event per rectangle with no marker for "this batch is finished". A client cannot
+then tell whether the update it asked for is still arriving, so the only options
+are to guess with a timer or to send the next request blindly — the latter
+queues overlapping updates on a slow link and produces visible tearing.
+
+The engine now emits `VncEvent::UpdateComplete` after the last rectangle of every
+batch (including empty batches). The client uses it to keep exactly one request
+outstanding (see `tests/frame_pacing.rs`, which fails with up to five overlapping
+requests when the guard is removed).
+
+Upstream resize tests filter the marker out: they assert on semantic events only.
 ## Diagnostics kept in the engine
 
 `RUST_LOG=vnc=trace` now prints the server's framebuffer size at `ServerInit` and

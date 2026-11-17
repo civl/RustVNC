@@ -866,6 +866,14 @@ impl App {
                         });
                     ui.end_row();
 
+                    ui.label(lang.t("帧率上限", "Frame rate cap"));
+                    ui.add(
+                        egui::DragValue::new(&mut self.draft.config.custom_fps)
+                            .range(5..=60)
+                            .suffix(" fps"),
+                    );
+                    ui.end_row();
+
                     ui.label(lang.t("编码", "Encoding"));
                     egui::ComboBox::from_id_salt("encoding")
                         .selected_text(self.draft.config.encoding.label())

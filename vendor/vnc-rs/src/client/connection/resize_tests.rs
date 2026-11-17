@@ -440,10 +440,19 @@ pub(super) async fn connect(stream: DuplexStream) -> VncClient {
 }
 
 pub(super) async fn event(client: &VncClient) -> VncEvent {
-    tokio::time::timeout(Duration::from_secs(2), client.recv_event())
-        .await
-        .unwrap()
-        .unwrap()
+    // `UpdateComplete` is a pacing marker emitted after every batch; these tests
+    // assert on the semantic events, so skip it rather than threading it through
+    // every expectation.
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(2), client.recv_event())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(event, VncEvent::UpdateComplete) {
+            continue;
+        }
+        return event;
+    }
 }
 
 pub(super) fn rect_header(rect: Rect, encoding: u32) -> Vec<u8> {

@@ -53,8 +53,10 @@ Windows 客户端 ── RFB/SSH (5900) ──────────► macOS 
   只有真机抓包确认 1105/1109 的字节布局后才有意义。
 - **真机指标未测**：1080p 30 分钟稳定性、帧率、输入 P95 需要一台可连的 Mac +
   Windows 真机，见 [ACCEPTANCE.md](ACCEPTANCE.md)。
-- **渲染是 OpenGL（eframe/glow）**，不是设计里的 D3D11；RDP 会话/虚拟机可能缺少
-  OpenGL 上下文。
+- **渲染是 OpenGL（eframe/glow）**，不是设计里的 D3D11。在 **无物理显示器的机器上通过
+  RustDesk 等远程工具查看时，OpenGL 窗口不呈现（表现为白板）**——DWM 合成的普通窗口正常，
+  GL 的 swap 在虚拟/间接显示器上失效。已用应用内 framebuffer 回读确认「画对了但没显示」。
+  临时办法：给机器接一个显示器或 HDMI 假负载；根治办法是切到 D3D11/wgpu 渲染（M2）。
 - Agent 安装包需要 Developer ID 签名 + 公证才能分发给他人（脚本已就绪，证书自备）。
 
 ## 目录

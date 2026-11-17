@@ -25,7 +25,7 @@ jobs:
   # only builds here. The Windows jobs are scoped to the packages that compile
   # there.
   macos:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -65,7 +65,7 @@ jobs:
           command: check
 
   windows-installer:
-    runs-on: windows-latest
+    runs-on: windows-2025
     # `secrets.*` is not allowed inside `if:` expressions (GitHub rejects the
     # whole workflow file); map the secrets to env and test those instead.
     env:
@@ -96,7 +96,7 @@ jobs:
           if-no-files-found: error
 
   windows-client:
-    runs-on: windows-latest
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

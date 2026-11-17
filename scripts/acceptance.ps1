@@ -60,6 +60,11 @@ Invoke-Step "tests: probe" "cargo test -p rfb-probe"
 Invoke-Step "tests: client (session/encoding/idle)" "cargo test -p rustvnc-client"
 Invoke-Step "tests: agent channel (QUIC loopback + Opus)" "cargo test -p rustvnc-agent-client"
 
+# Optimised builds catch a whole class of bug that debug hides (the 16 bpp
+# "all black" regression was an integer overflow that panicked in debug but
+# wrapped silently in release).
+Invoke-Step "tests: release mode (client + engine + agent)" "cargo test --release -p rustvnc-client -p vnc-rs -p rustvnc-agent-client"
+
 if (-not $SkipBuild) {
     Invoke-Step "release build: client" "cargo build --release -p rustvnc-client"
 }

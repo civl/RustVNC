@@ -66,6 +66,24 @@ this is not something that can be fixed by waiting.
    (`cargo::redundant_homepage`). `Cargo.toml.orig` is left untouched as the
    upstream reference copy.
 
+9. **`src/codec/tight.rs`** — lint only, no behaviour change: the two
+   `for i in 0..4` loops were rewritten (`std::array::from_fn` and
+   `iter_mut().enumerate()`) because `clippy::needless_range_loop` fails the
+   workspace build with `-D warnings`. The vendored crate is part of the
+   workspace, so upstream's style has to satisfy our lint gate.
+
+10. **`src/client/connection/tests.rs` and `resize_tests.rs`** — the `event()`
+    helper and the one array-index assertion filter out
+    `VncEvent::UpdateComplete`, which patch 3 introduced: those tests assert on
+    semantic events and would otherwise be off by one marker.
+
+## Verifying this file against the code
+
+`git diff --no-index <cargo-registry>/vnc-rs-0.6.1 vendor/vnc-rs` lists exactly
+this set (touch points above plus `src/apple.rs`, `src/codec/zlib_rect.rs`,
+`src/codec/cursor.rs`, `src/codec/mod.rs`, `src/lib.rs`, `src/limits.rs` and the
+two new test files). Anything else in the diff is a documentation bug here.
+
 ## Apple body layout — verified on a real Mac (2026-11-17)
 
 Captured from a Mac mini M4 (`RFB 003.889`, screen sharing) by requesting the

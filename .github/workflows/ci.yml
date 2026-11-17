@@ -39,6 +39,10 @@ jobs:
         run: cargo test --workspace
       - name: Release build
         run: cargo build --workspace --release
+      - name: Test (release)
+        # Optimised builds catch overflow-dependent bugs that a debug build
+        # panics on in a different place; artefacts are warm from the step above.
+        run: cargo test --workspace --release
       - name: Check script permissions
         # A shell script committed without the executable bit only fails later,
         # inside the signing/notarization path, where it is expensive to debug.
@@ -115,3 +119,7 @@ jobs:
         run: cargo test -p rustvnc-client
       - name: Build client
         run: cargo build -p rustvnc-client
+      - name: Test (release)
+        # The Windows half of the release-mode gate; the macOS job covers the
+        # whole workspace.
+        run: cargo test --release -p rustvnc-client -p rustvnc-agent-client -p vnc-rs -p rfb-probe

@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod client;
 pub mod clipboard;
+pub mod display;
 pub mod paths;
 pub mod protocol;
 pub mod secrets;

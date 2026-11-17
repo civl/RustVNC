@@ -66,6 +66,7 @@ pub struct SessionConfig {
 #[derive(Debug)]
 pub enum AgentCommand {
     ClipboardText(String),
+    SetDisplayMode { width: u16, height: u16 },
     Stop,
 }
 
@@ -77,6 +78,13 @@ pub enum AgentEvent {
     },
     /// Clipboard text produced on the Mac.
     Clipboard(String),
+    /// Result of a display-mode request.
+    DisplayModeResult {
+        width: u16,
+        height: u16,
+        applied: bool,
+        message: String,
+    },
     AudioStarted,
     AudioStopped,
     Error(String),
@@ -130,6 +138,12 @@ impl AgentSession {
 
     pub fn send_clipboard(&self, text: String) {
         let _ = self.commands.send(AgentCommand::ClipboardText(text));
+    }
+
+    pub fn set_display_mode(&self, width: u16, height: u16) {
+        let _ = self
+            .commands
+            .send(AgentCommand::SetDisplayMode { width, height });
     }
 
     pub fn stop(&mut self) {
@@ -457,6 +471,16 @@ async fn connect_and_run(
                         break Err(err);
                     }
                 }
+                Some(AgentCommand::SetDisplayMode { width, height }) => {
+                    if let Err(err) = protocol::write_msg(
+                        &mut send,
+                        &ControlMsg::SetDisplayMode { width, height },
+                    )
+                    .await
+                    {
+                        break Err(err);
+                    }
+                }
                 Some(AgentCommand::Stop) | None => {
                     let _ = protocol::write_msg(&mut send, &ControlMsg::Goodbye).await;
                     break Ok(());
@@ -465,6 +489,19 @@ async fn connect_and_run(
             message = msg_rx.recv() => match message {
                 Some(ControlMsg::ClipboardText { text }) => {
                     let _ = events.send(AgentEvent::Clipboard(text));
+                }
+                Some(ControlMsg::DisplayModeResult {
+                    width,
+                    height,
+                    applied,
+                    message,
+                }) => {
+                    let _ = events.send(AgentEvent::DisplayModeResult {
+                        width,
+                        height,
+                        applied,
+                        message,
+                    });
                 }
                 Some(ControlMsg::Pong { .. }) | Some(ControlMsg::Ping { .. }) => {}
                 Some(ControlMsg::Error { code, message }) => {

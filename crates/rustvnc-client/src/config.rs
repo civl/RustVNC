@@ -59,6 +59,37 @@ impl EncodingPreference {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ResolutionPreset {
+    #[default]
+    Native,
+    P1080,
+    P1440,
+    P4K,
+}
+
+impl ResolutionPreset {
+    pub const ALL: [Self; 4] = [Self::Native, Self::P1080, Self::P1440, Self::P4K];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Native => "原生",
+            Self::P1080 => "1920×1080",
+            Self::P1440 => "2560×1440",
+            Self::P4K => "3840×2160",
+        }
+    }
+
+    pub fn dimensions(self) -> Option<(u16, u16)> {
+        match self {
+            Self::Native => None,
+            Self::P1080 => Some((1920, 1080)),
+            Self::P1440 => Some((2560, 1440)),
+            Self::P4K => Some((3840, 2160)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthMode {
     Auto,
@@ -162,6 +193,9 @@ pub struct ClientConfig {
     #[serde(default = "default_custom_fps")]
     pub custom_fps: u32,
     pub encoding: EncodingPreference,
+    /// Opt-in display-mode request applied at session start through the agent.
+    #[serde(default)]
+    pub resolution: ResolutionPreset,
     /// Advertise Apple's private pseudo-encodings (1104/1105/1107/1109/1110).
     ///
     /// They are parsed safely (length-prefixed skip) but off by default: their
@@ -188,6 +222,7 @@ impl Default for ClientConfig {
             bpp: 32,
             custom_fps: default_custom_fps(),
             encoding: EncodingPreference::Zrle,
+            resolution: ResolutionPreset::Native,
             apple_encodings: false,
             agent: AgentConfig::default(),
             security: SecurityMode::Direct,

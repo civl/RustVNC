@@ -17,6 +17,7 @@ use tracing::{info, warn};
 
 use crate::audio::AudioCapture;
 use crate::clipboard;
+use crate::display::DisplayGuard;
 use crate::protocol::{self, ControlMsg};
 use crate::tls;
 
@@ -38,7 +39,16 @@ pub struct ServeOptions {
     pub sans: Vec<String>,
     pub keychain: bool,
     pub audio_enabled: bool,
+    /// Runtime switch controlled by the menu bar; false by default.
+    pub allow_resolution: Arc<AtomicBool>,
     pub events: Option<Sender<ServerEvent>>,
+}
+
+#[derive(Clone)]
+struct SessionOptions {
+    audio_enabled: bool,
+    allow_resolution: Arc<AtomicBool>,
+    state_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +82,12 @@ pub async fn run_with_shutdown(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     tls::install_provider();
+
+    match crate::display::restore_saved(&options.state_dir) {
+        Ok(true) => info!("restored display mode left by a previous session"),
+        Ok(false) => {}
+        Err(err) => warn!("display mode recovery failed: {err:#}"),
+    }
 
     let material = Arc::new(tls::ensure_material(
         &options.state_dir,
@@ -137,6 +153,11 @@ pub async fn run_with_shutdown(
                 let pairing = Arc::clone(&pairing);
                 let pair_limiter = Arc::clone(&pair_limiter);
                 let events = options.events.clone();
+                let session_options = SessionOptions {
+                    audio_enabled: options.audio_enabled,
+                    allow_resolution: Arc::clone(&options.allow_resolution),
+                    state_dir: options.state_dir.clone(),
+                };
 
                 tasks.spawn(async move {
                     match incoming.await {
@@ -149,7 +170,7 @@ pub async fn run_with_shutdown(
                                 pairing,
                                 pair_limiter,
                                 events,
-                                options.audio_enabled,
+                                session_options,
                             )
                             .await
                             {
@@ -196,7 +217,7 @@ async fn handle_connection(
     pairing: Arc<Pairing>,
     pair_limiter: Arc<RateLimiter>,
     events: Option<Sender<ServerEvent>>,
-    audio_enabled: bool,
+    session_options: SessionOptions,
 ) -> Result<()> {
     let (mut send, mut recv) = connection
         .accept_bi()
@@ -314,7 +335,7 @@ async fn handle_connection(
             let mut audio_forward = None;
             let mut capabilities = 0u32;
 
-            if audio_enabled && client_capabilities & protocol::CAP_AUDIO != 0 {
+            if session_options.audio_enabled && client_capabilities & protocol::CAP_AUDIO != 0 {
                 // Creating the Core Audio tap can block while macOS shows the
                 // "System Audio Recording" prompt, and `ServerHello` must go out
                 // regardless: the client needs it for clipboard and keepalive.
@@ -354,6 +375,7 @@ async fn handle_connection(
                 }
             }
 
+            capabilities |= protocol::CAP_DISPLAY;
             protocol::write_msg(
                 &mut send,
                 &ControlMsg::ServerHello {
@@ -397,6 +419,7 @@ async fn handle_connection(
                 }
             };
             let mut last_received = String::new();
+            let mut display: Option<DisplayGuard> = None;
 
             loop {
                 tokio::select! {
@@ -417,6 +440,56 @@ async fn handle_connection(
                                         warn!("clipboard write failed: {err:#}");
                                         clipboard_enabled = false;
                                     }
+                                }
+                            }
+                            Some(ControlMsg::SetDisplayMode { width, height }) => {
+                                let result = if !session_options.allow_resolution.load(Ordering::Relaxed) {
+                                    Err(anyhow::anyhow!(
+                                        "远程分辨率控制已在 Mac 菜单栏关闭"
+                                    ))
+                                } else {
+                                    if display.is_none() {
+                                        match DisplayGuard::new(session_options.state_dir.clone()) {
+                                            Ok(guard) => display = Some(guard),
+                                            Err(err) => {
+                                                let _ = protocol::write_msg(
+                                                    &mut send,
+                                                    &ControlMsg::DisplayModeResult {
+                                                        width,
+                                                        height,
+                                                        applied: false,
+                                                        message: format!("{err:#}"),
+                                                    },
+                                                )
+                                                .await;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    display
+                                        .as_ref()
+                                        .expect("display guard")
+                                        .apply(width, height)
+                                };
+                                let response = match result {
+                                    Ok(mode) => protocol::ControlMsg::DisplayModeResult {
+                                        width: mode.width,
+                                        height: mode.height,
+                                        applied: true,
+                                        message: format!(
+                                            "{}x{} ({}x{} px)",
+                                            mode.width, mode.height, mode.pixel_width, mode.pixel_height
+                                        ),
+                                    },
+                                    Err(err) => protocol::ControlMsg::DisplayModeResult {
+                                        width,
+                                        height,
+                                        applied: false,
+                                        message: format!("{err:#}"),
+                                    },
+                                };
+                                if protocol::write_msg(&mut send, &response).await.is_err() {
+                                    break;
                                 }
                             }
                             Some(ControlMsg::Goodbye) | None => break,
@@ -464,6 +537,7 @@ async fn handle_connection(
                     }
                 }
             }
+            drop(display);
             reader.abort();
             if let Some(mut capture) = audio_capture.take() {
                 capture.stop();

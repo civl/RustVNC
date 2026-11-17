@@ -1,7 +1,7 @@
 //! Diagnostic for the agent channel.
 //!
 //! ```text
-//! cargo run -p rustvnc-agent-client --example agent_probe -- <host:port> [pairing-code] [seconds]
+//! cargo run -p rustvnc-agent-client --example agent_probe -- <host:port> [pairing-code] [seconds] [noaudio] [WxH]
 //! ```
 //!
 //! * with no code: only the QUIC/TLS handshake is attempted (pairing AcceptAny),
@@ -41,6 +41,10 @@ async fn main() -> Result<()> {
     // `noaudio` as the 4th argument asks the agent not to start capture, which
     // isolates audio-init stalls (TCC prompts) from control-plane problems.
     let audio = args.get(3).map(|value| value != "noaudio").unwrap_or(true);
+    let display = args.get(4).and_then(|value| {
+        let (width, height) = value.split_once('x')?;
+        Some((width.parse::<u16>().ok()?, height.parse::<u16>().ok()?))
+    });
     let state_dir = default_state_dir();
     println!("addr      {addr}");
     println!("state dir {}", state_dir.display());
@@ -117,6 +121,7 @@ async fn main() -> Result<()> {
     let deadline = started + Duration::from_secs(seconds);
     let mut last_beat = 0u64;
     let mut sent_clipboard = false;
+    let mut sent_display = false;
     let mut connected = false;
     while std::time::Instant::now() < deadline {
         while let Some(event) = session.try_recv() {
@@ -131,6 +136,12 @@ async fn main() -> Result<()> {
                 AgentEvent::Clipboard(text) => {
                     println!("CLIPBOARD from agent: {} bytes", text.len())
                 }
+                AgentEvent::DisplayModeResult {
+                    width,
+                    height,
+                    applied,
+                    message,
+                } => println!("DISPLAY {width}x{height} applied={applied}: {message}"),
                 AgentEvent::AudioStarted => println!("AUDIO started"),
                 AgentEvent::AudioStopped => println!("AUDIO stopped"),
                 AgentEvent::Error(message) => println!("ERROR {message}"),
@@ -140,6 +151,13 @@ async fn main() -> Result<()> {
         if connected && !sent_clipboard {
             session.send_clipboard("rustvnc-agent-probe".to_string());
             sent_clipboard = true;
+        }
+        if connected
+            && !sent_display
+            && let Some((width, height)) = display
+        {
+            session.set_display_mode(width, height);
+            sent_display = true;
         }
         let elapsed = started.elapsed().as_secs();
         if elapsed >= last_beat + 10 {

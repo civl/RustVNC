@@ -7,7 +7,7 @@ use rustvnc_agent_client::{
     AgentEvent, AgentSession, PairConfig, SessionConfig as AgentSessionConfig, pair,
 };
 use rustvnc_client::config::{
-    AuthMode, ClientConfig, EncodingPreference, QualityPreset, SecurityMode,
+    AuthMode, ClientConfig, EncodingPreference, QualityPreset, ResolutionPreset, SecurityMode,
 };
 use rustvnc_client::credentials::CredentialStore;
 use rustvnc_client::input::{key_to_keysym, text_to_keysyms};
@@ -170,6 +170,7 @@ struct App {
     /// failure here never tears down the RFB session.
     agent: Option<AgentSession>,
     agent_status: String,
+    pending_resolution: Option<(u16, u16)>,
     agent_pair_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
 }
 
@@ -295,6 +296,7 @@ impl App {
             info: None,
             agent: None,
             agent_status: String::new(),
+            pending_resolution: None,
             agent_pair_rx: None,
         }
     }
@@ -462,6 +464,7 @@ impl App {
     /// `agent_status` and leaves the RFB session untouched — the agent only
     /// adds clipboard and audio.
     fn start_agent(&mut self) {
+        self.pending_resolution = None;
         if !self.draft.config.agent.enabled {
             return;
         }
@@ -477,6 +480,10 @@ impl App {
         }) {
             Ok(session) => {
                 self.agent_status = "连接 Agent…".to_string();
+                if let Some((width, height)) = self.draft.config.resolution.dimensions() {
+                    session.set_display_mode(width, height);
+                    self.agent_status = format!("连接 Agent…（请求分辨率 {width}×{height}）");
+                }
                 self.agent = Some(session);
             }
             Err(err) => {
@@ -522,6 +529,17 @@ impl App {
                         "音频未启用"
                     };
                     self.agent_status = format!("{agent} · {audio}");
+                    if let Some((width, height)) = self.pending_resolution.take() {
+                        if capabilities & rustvnc_agent_client::CAP_DISPLAY != 0 {
+                            if let Some(session) = &self.agent {
+                                session.set_display_mode(width, height);
+                            }
+                            self.agent_status
+                                .push_str(&format!(" · 请求分辨率 {width}×{height}"));
+                        } else {
+                            self.agent_status.push_str(" · Agent 不支持分辨率控制");
+                        }
+                    }
                 }
                 AgentEvent::Clipboard(text) => {
                     if self.clipboard_sync {
@@ -541,6 +559,18 @@ impl App {
                     }
                 }
                 AgentEvent::AudioStopped => {}
+                AgentEvent::DisplayModeResult {
+                    width,
+                    height,
+                    applied,
+                    message,
+                } => {
+                    self.agent_status = if applied {
+                        format!("显示分辨率已切换为 {width}×{height}")
+                    } else {
+                        format!("分辨率切换失败：{message}")
+                    };
+                }
                 AgentEvent::Error(message) => self.agent_status = message,
                 AgentEvent::Closed => {
                     self.agent_status = "Agent 通道已断开".to_string();
@@ -1000,6 +1030,20 @@ impl App {
                     });
                 ui.end_row();
 
+                ui.label(lang.t("远端分辨率", "Remote resolution"));
+                egui::ComboBox::from_id_salt("resolution")
+                    .selected_text(self.draft.config.resolution.label())
+                    .show_ui(ui, |ui| {
+                        for resolution in ResolutionPreset::ALL {
+                            ui.selectable_value(
+                                &mut self.draft.config.resolution,
+                                resolution,
+                                resolution.label(),
+                            );
+                        }
+                    });
+                ui.end_row();
+
                 if self.draft.config.quality == QualityPreset::Custom {
                     ui.label(lang.t("位深", "BPP"));
                     egui::ComboBox::from_id_salt("bpp")
@@ -1199,6 +1243,10 @@ impl App {
         ui.label(lang.t(
             "提示：SSH 隧道使用系统 OpenSSH，仅支持密钥认证，主机密钥变更会被拒绝。",
             "SSH uses system OpenSSH with key auth only; host key changes are rejected.",
+        ));
+        ui.label(lang.t(
+            "远端分辨率需要启用 Agent 通道，并在 Mac 菜单栏开启“允许远程调整分辨率”；断开时自动恢复原分辨率。",
+            "Remote resolution needs the agent channel and the Mac menu toggle; the original mode is restored on disconnect.",
         ));
     }
 

@@ -209,6 +209,18 @@ async fn handle(connection: quinn::Connection, agent: StubAgent, audio: bool) ->
                         )
                         .await?;
                     }
+                    Ok(ControlMsg::SetDisplayMode { width, height }) => {
+                        protocol::write_msg(
+                            &mut send,
+                            &ControlMsg::DisplayModeResult {
+                                width,
+                                height,
+                                applied: true,
+                                message: "stub accepted".to_string(),
+                            },
+                        )
+                        .await?;
+                    }
                     Ok(ControlMsg::Goodbye) | Err(_) => break,
                     Ok(_) => {}
                 }
@@ -313,6 +325,22 @@ fn pairing_pins_the_agent_certificate_and_clipboard_round_trips() {
         },
     );
     assert_eq!(clipboard.as_deref(), Some("mac:hello"));
+
+    session.set_display_mode(1920, 1080);
+    let display = wait_for(
+        &session,
+        std::time::Duration::from_secs(10),
+        |event| match event {
+            AgentEvent::DisplayModeResult {
+                width,
+                height,
+                applied,
+                ..
+            } => Some((*width, *height, *applied)),
+            _ => None,
+        },
+    );
+    assert_eq!(display, Some((1920, 1080, true)));
 
     session.stop();
 }

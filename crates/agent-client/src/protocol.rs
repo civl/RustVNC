@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTO_VERSION: u16 = 1;
 pub const CAP_AUDIO: u32 = 1 << 0;
+pub const CAP_DISPLAY: u32 = 1 << 1;
 
 pub const AUDIO_VERSION: u8 = 1;
 pub const AUDIO_HEADER_LEN: usize = 7;
@@ -85,6 +86,18 @@ pub enum ControlMsg {
     Goodbye,
     Error {
         code: u16,
+        message: String,
+    },
+    /// Ask the macOS agent to switch the main display mode for this session.
+    SetDisplayMode {
+        width: u16,
+        height: u16,
+    },
+    /// Result of [`ControlMsg::SetDisplayMode`].
+    DisplayModeResult {
+        width: u16,
+        height: u16,
+        applied: bool,
         message: String,
     },
 }
@@ -183,6 +196,16 @@ mod tests {
                 text: "复制".to_string(),
             },
             ControlMsg::Goodbye,
+            ControlMsg::SetDisplayMode {
+                width: 1920,
+                height: 1080,
+            },
+            ControlMsg::DisplayModeResult {
+                width: 1920,
+                height: 1080,
+                applied: true,
+                message: "ok".to_string(),
+            },
             error(error_code::BAD_CODE, "wrong code"),
         ];
         for message in messages {

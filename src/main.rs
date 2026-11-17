@@ -106,6 +106,7 @@ struct ServerUi {
     events_rx: Option<std::sync::mpsc::Receiver<ServerEvent>>,
     shutdown: Option<tokio::sync::watch::Sender<bool>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    allow_resolution: Arc<AtomicBool>,
 }
 
 struct MenuItems {
@@ -114,6 +115,7 @@ struct MenuItems {
     client: MenuItem,
     start_stop: MenuItem,
     login_status: MenuItem,
+    resolution: MenuItem,
 }
 
 fn run_gui() -> anyhow::Result<()> {
@@ -191,6 +193,20 @@ fn run_gui() -> anyhow::Result<()> {
                         refresh_server_items(&server_ui, items);
                     }
                 }
+                "toggle_resolution" => {
+                    let next = !server_ui.allow_resolution.load(Ordering::Relaxed);
+                    server_ui.allow_resolution.store(next, Ordering::Relaxed);
+                    if let Some(items) = menu_items.as_ref() {
+                        set_text(
+                            &items.resolution,
+                            if next {
+                                "允许远程调整分辨率：开启".to_string()
+                            } else {
+                                "允许远程调整分辨率：关闭".to_string()
+                            },
+                        );
+                    }
+                }
                 "copy_code" => {
                     if let Some(info) = server_ui.info.as_ref().filter(|_| !server_ui.code_used) {
                         copy_text(&info.pair_code);
@@ -243,6 +259,7 @@ fn build_tray() -> anyhow::Result<(TrayIcon, MenuItems)> {
     let client = MenuItem::with_id("client_status", "客户端：未连接", false, None);
     let mode = MenuItem::with_id("mode", "模式：A2（控制面 + 剪贴板）", false, None);
     let start_stop = MenuItem::with_id("start_stop", "停止服务器", true, None);
+    let resolution = MenuItem::with_id("toggle_resolution", "允许远程调整分辨率：关闭", true, None);
     let login_status = MenuItem::with_id("login_status", "登录项：检查中…", false, None);
     let register = MenuItem::with_id("register", "启用登录时启动", true, None);
     let unregister = MenuItem::with_id("unregister", "停用登录时启动（会退出）", true, None);
@@ -256,6 +273,7 @@ fn build_tray() -> anyhow::Result<(TrayIcon, MenuItems)> {
     menu.append(&mode)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&start_stop)?;
+    menu.append(&resolution)?;
     menu.append(&login_status)?;
     menu.append(&register)?;
     menu.append(&unregister)?;
@@ -279,6 +297,7 @@ fn build_tray() -> anyhow::Result<(TrayIcon, MenuItems)> {
             client,
             start_stop,
             login_status,
+            resolution,
         },
     ))
 }
@@ -297,6 +316,7 @@ fn start_server(ui: &mut ServerUi) {
         sans: Vec::new(),
         keychain: std::env::var("RUSTVNC_NO_KEYCHAIN").is_err(),
         audio_enabled: std::env::var("RUSTVNC_NO_AUDIO").is_err(),
+        allow_resolution: Arc::clone(&ui.allow_resolution),
         events: Some(events_tx.clone()),
     };
 
@@ -496,7 +516,7 @@ fn print_help() {
          \n\
          Usage:\n\
            rustvnc-agent                 Run the menu bar agent\n\
-           rustvnc-agent --serve [--no-keychain] [--no-audio]  Run the control server (headless)\n\
+           rustvnc-agent --serve [--no-keychain] [--no-audio] [--allow-resolution]  Run the control server (headless)\n\
            rustvnc-agent --status        Print SMAppService status\n\
            rustvnc-agent --register      Register the bundled LaunchAgent\n\
            rustvnc-agent --unregister    Unregister the bundled LaunchAgent\n\
@@ -514,6 +534,7 @@ fn parse_serve_options(args: &[String]) -> anyhow::Result<rustvnc_agent::server:
     let mut sans = Vec::new();
     let mut keychain = true;
     let mut audio_enabled = true;
+    let mut allow_resolution = std::env::var("RUSTVNC_ALLOW_RESOLUTION").is_ok();
 
     let mut index = 0;
     while index < args.len() {
@@ -548,6 +569,9 @@ fn parse_serve_options(args: &[String]) -> anyhow::Result<rustvnc_agent::server:
             "--no-audio" => {
                 audio_enabled = false;
             }
+            "--allow-resolution" => {
+                allow_resolution = true;
+            }
             other => bail!("unknown --serve option: {other}"),
         }
         index += 1;
@@ -560,6 +584,7 @@ fn parse_serve_options(args: &[String]) -> anyhow::Result<rustvnc_agent::server:
         sans,
         keychain,
         audio_enabled,
+        allow_resolution: Arc::new(AtomicBool::new(allow_resolution)),
         events: None,
     })
 }

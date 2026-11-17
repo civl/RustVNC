@@ -25,6 +25,7 @@ impl TestServer {
             sans: vec![],
             keychain: false,
             audio_enabled: false,
+            allow_resolution: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             events: None,
         };
         let handle = tokio::spawn(server::run_with_shutdown(

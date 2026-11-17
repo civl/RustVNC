@@ -53,10 +53,14 @@ Windows 客户端 ── RFB/SSH (5900) ──────────► macOS 
   只有真机抓包确认 1105/1109 的字节布局后才有意义。
 - **真机指标未测**：1080p 30 分钟稳定性、帧率、输入 P95 需要一台可连的 Mac +
   Windows 真机，见 [ACCEPTANCE.md](ACCEPTANCE.md)。
-- **渲染走 wgpu（D3D12/Vulkan），OpenGL 只作回退**。此前用 glow/OpenGL 时，在无物理显示器、
-  通过 RustDesk 等远程工具查看的机器上窗口是白板（应用内 framebuffer 回读证明画对了但 GL 的
-  swap 不呈现）。现在默认 wgpu；wgpu 初始化失败会自动回退到 glow，也可用
-  `RUSTVNC_RENDERER=glow` 强制旧后端排查。
+- **渲染后端按 D3D12 → Vulkan → OpenGL(wgpu) → glow 的顺序尝试**，第一个能初始化的生效。
+  Windows 上优先 **D3D12**：它是 DWM 合成与远程抓屏（RustDesk/RDP）真正预期的 API，
+  而纯 OpenGL 在无物理显示器/间接显示器上**根本不呈现**（应用内 framebuffer 回读证明画对了
+  但 swap 不出图，表现为白板）。
+  - `RUSTVNC_RENDERER=dx12|vulkan|gl|glow` 可强制单一后端（排查用）
+  - **D3D11 无法通过 wgpu 获得**（wgpu 只有 DX12/Vulkan/GL 后端）。若目标机器仅有 D3D11
+    级显卡，实际落点是 wgpu 的 GL 后端或 glow；真要 D3D11 需自带 ANGLE 或写自定义渲染器，
+    当前不做。`RUSTVNC_RENDERER=gl` 可显式走 wgpu 的 OpenGL 后端做对照。
 - Agent 安装包需要 Developer ID 签名 + 公证才能分发给他人（脚本已就绪，证书自备）。
 
 ## 目录

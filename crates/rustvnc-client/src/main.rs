@@ -16,32 +16,88 @@ use rustvnc_client::session::{Session, SessionEvent};
 use rustvnc_client::ssh::{self, HostKeyProbe};
 use vnc::{ClientKeyEvent, ClientMouseEvent, Rect, X11Event};
 
-fn main() -> eframe::Result {
-    let _log_guard = rustvnc_client::diag::init_tracing();
+/// How the UI should be rendered, in preference order.
+///
+/// Windows gets a native D3D12 attempt first: it is the API the DWM compositor
+/// and remote-capture tools (RustDesk, RDP) actually expect, and the OpenGL path
+/// does not present at all on indirect/headless displays. Vulkan and wgpu's GL
+/// backend follow, and `glow` (the old pure-OpenGL path) is the last resort.
+#[derive(Debug, Clone, Copy)]
+enum RenderAttempt {
+    Wgpu { backends: wgpu::Backends },
+    Glow,
+}
 
-    // wgpu (D3D12/Vulkan) is the default backend: the OpenGL path does not
-    // present on headless or indirectly attached displays — with the desktop
-    // viewed through RustDesk on a machine without a monitor, every glow window
-    // rendered correctly into its framebuffer and still appeared blank white.
-    // `RUSTVNC_RENDERER=glow` forces the old backend for troubleshooting.
-    let preferred = match std::env::var("RUSTVNC_RENDERER").as_deref() {
-        Ok("glow") => eframe::Renderer::Glow,
-        _ => eframe::Renderer::Wgpu,
+fn render_attempts() -> Vec<RenderAttempt> {
+    let dx12 = RenderAttempt::Wgpu {
+        backends: wgpu::Backends::DX12,
     };
-    match run_native(preferred) {
-        Err(err) if preferred == eframe::Renderer::Wgpu => {
-            tracing::warn!("wgpu renderer unavailable ({err}); falling back to glow/OpenGL");
-            run_native(eframe::Renderer::Glow)
-        }
-        other => other,
+    let vulkan = RenderAttempt::Wgpu {
+        backends: wgpu::Backends::VULKAN,
+    };
+    let gl = RenderAttempt::Wgpu {
+        backends: wgpu::Backends::GL,
+    };
+    let glow = RenderAttempt::Glow;
+
+    match std::env::var("RUSTVNC_RENDERER")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        // Explicit pinning, for diagnostics.
+        "glow" | "opengl-old" => vec![glow],
+        "dx12" | "d3d12" => vec![dx12],
+        "vulkan" => vec![vulkan],
+        "gl" | "opengl" => vec![gl],
+        // "wgpu" and anything unrecognised: the full chain.
+        _ => vec![dx12, vulkan, gl, glow],
     }
 }
 
-fn run_native(renderer: eframe::Renderer) -> eframe::Result {
-    tracing::info!("starting UI with the {renderer:?} renderer");
+fn wgpu_configuration(backends: wgpu::Backends) -> eframe::egui_wgpu::WgpuConfiguration {
+    let mut configuration = eframe::egui_wgpu::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut configuration.wgpu_setup {
+        // wgpu's own default is `PRIMARY | GL`, and on Windows that enumerates
+        // Vulkan before D3D12 — which is how a Vulkan adapter ended up driving a
+        // desktop that D3D12 handles better.
+        setup.instance_descriptor.backends = backends;
+    }
+    // A remote desktop wants the shortest possible present queue.
+    configuration.desired_maximum_frame_latency = Some(1);
+    configuration
+}
+
+fn main() -> eframe::Result {
+    let _log_guard = rustvnc_client::diag::init_tracing();
+
+    let mut last_error = Ok(());
+    for attempt in render_attempts() {
+        match run_native(attempt) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                tracing::warn!("renderer {attempt:?} unavailable: {err}");
+                last_error = Err(err);
+            }
+        }
+    }
+    last_error
+}
+
+fn run_native(attempt: RenderAttempt) -> eframe::Result {
+    let renderer = match attempt {
+        RenderAttempt::Wgpu { .. } => eframe::Renderer::Wgpu,
+        RenderAttempt::Glow => eframe::Renderer::Glow,
+    };
+    let wgpu_options = match attempt {
+        RenderAttempt::Wgpu { backends } => wgpu_configuration(backends),
+        RenderAttempt::Glow => Default::default(),
+    };
+    tracing::info!("starting UI with {attempt:?}");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1120.0, 720.0]),
         renderer,
+        wgpu_options,
         ..Default::default()
     };
     eframe::run_native(
@@ -1801,5 +1857,66 @@ mod pixel_tests {
             "grey at x=1 collapsed: {:?}",
             region.pixels[0]
         );
+    }
+}
+
+#[cfg(test)]
+mod renderer_tests {
+    use super::*;
+
+    fn chain_of(attempts: &[RenderAttempt]) -> Vec<String> {
+        attempts
+            .iter()
+            .map(|attempt| match attempt {
+                RenderAttempt::Wgpu { backends } => format!("{backends:?}"),
+                RenderAttempt::Glow => "glow".to_string(),
+            })
+            .collect()
+    }
+
+    /// One test, not two: `RUSTVNC_RENDERER` is process-global, and two tests
+    /// racing on it is how this suite briefly became flaky.
+    ///
+    /// Windows must try native D3D12 first — it is what the compositor and
+    /// remote-capture tools expect, while wgpu's own default (PRIMARY | GL)
+    /// enumerates Vulkan before it.
+    #[test]
+    fn the_renderer_chain_prefers_d3d12_and_can_be_pinned() {
+        // SAFETY: this is the only test that touches `RUSTVNC_RENDERER`.
+        unsafe { std::env::remove_var("RUSTVNC_RENDERER") };
+        let chain = chain_of(&render_attempts());
+        assert!(
+            chain[0].contains("DX12"),
+            "first attempt must be D3D12: {chain:?}"
+        );
+        assert_eq!(chain.len(), 4, "unexpected chain: {chain:?}");
+        assert!(
+            chain.last().unwrap().contains("glow"),
+            "glow must be the last resort: {chain:?}"
+        );
+
+        for (value, expected) in [
+            ("dx12", "DX12"),
+            ("d3d12", "DX12"),
+            ("vulkan", "VULKAN"),
+            ("gl", "GL"),
+            ("glow", "glow"),
+        ] {
+            // SAFETY: sequential within this test.
+            unsafe { std::env::set_var("RUSTVNC_RENDERER", value) };
+            let pinned = chain_of(&render_attempts());
+            assert_eq!(
+                pinned.len(),
+                1,
+                "{value} should pin one backend: {pinned:?}"
+            );
+            assert!(
+                pinned[0].contains(expected),
+                "{value} selected {}",
+                pinned[0]
+            );
+        }
+        // SAFETY: restore the shared environment for any later test.
+        unsafe { std::env::remove_var("RUSTVNC_RENDERER") };
     }
 }

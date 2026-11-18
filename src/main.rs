@@ -526,9 +526,9 @@ fn print_help() {
 }
 
 fn parse_serve_options(args: &[String]) -> anyhow::Result<rustvnc_agent::server::ServeOptions> {
-    let mut listen: SocketAddr = "127.0.0.1:8443"
-        .parse()
-        .expect("valid default listen address");
+    // Same default as `listen_addr()`, and `RUSTVNC_LISTEN` still applies: a
+    // `--serve` agent stuck on loopback is unreachable from another machine.
+    let mut listen: SocketAddr = listen_addr();
     let mut state_dir = rustvnc_agent::paths::agent_dir();
     let mut pair_code = None;
     let mut sans = Vec::new();

@@ -340,6 +340,12 @@ impl MirrorGuard {
             .iter()
             .map(|id| (*id, CGDisplay::new(*id).mirrors_display()))
             .collect();
+        tracing::info!(
+            displays = ?ids,
+            main = CGDisplay::main().id,
+            "display layout: {} display(s) found",
+            ids.len()
+        );
         let guard = Self { previous };
         if single {
             let main = CGDisplay::main();

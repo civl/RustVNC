@@ -13,9 +13,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use core_foundation::array::CFArray;
 use core_foundation::base::TCFType;
-use core_graphics::base::CGDirectDisplayID;
 use core_graphics::display::{
-    CGConfigureOption, CGDisplay, CGDisplayCopyAllDisplayModes, CGDisplayMode, CGDisplayModeRetain,
+    CGConfigureOption, CGDirectDisplayID, CGDisplay, CGDisplayCopyAllDisplayModes, CGDisplayMode,
+    CGDisplayModeRetain,
 };
 use foreign_types_shared::ForeignType;
 

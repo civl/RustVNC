@@ -52,7 +52,7 @@ Windows 客户端 ── RFB/SSH (5900) ──────────► macOS 
 - **SSH 密码认证需要新版 OpenSSH**：现在通过 `SSH_ASKPASS`（客户端自身以
   `--ssh-askpass` 模式运行）支持密码，Unix 需 OpenSSH 8.4+、Windows 需 8.6+；
   旧版仍会明确提示改用密钥（提供一键生成 ed25519 密钥 + `authorized_keys` 指引）。
-- **Apple 1105 字段顺序未由真实抓包确认**：解析器接受常见的 `u16 w,h + f64 scale + u32 display id` 与 `u32` 变体，校验后只写诊断日志，不改变视口；1104 的 hotspot/size 也仅记录。默认不请求“Apple 扩展”。需要真机样本时运行 `./scripts/capture-apple.sh`（密码不落盘）。
+- **Apple 1105 标准 RFB 路径不发送**：在 BetterDisplay 8960×2880 虚拟屏 + PointerPos + 指针移动 + 显示模式切换的真机实验中，仍只收到 1107/1109/1110。1105 疑似属于 Apple 高性能扩展（0x1d/0x451），当前标准客户端不依赖它；候选解析器仅保留为诊断。1104 的 hotspot/size 仅记录，光标形状由标准 `-239` 提供。
 - **真机指标未测**：1080p 30 分钟稳定性、帧率、输入 P95 需要一台可连的 Mac +
   Windows 真机，见 [ACCEPTANCE.md](ACCEPTANCE.md)。
 - **自适应帧率**：按“请求 → 完整帧”延迟的 EMA 自动降/升请求间隔（200 ms / 80 ms 双阈值、连续帧滞回，上限 500 ms）；画面静止 3 帧后另降到 4 fps。关闭“自适应帧率”即锁定画质档帧率。状态栏显示延迟、自适应间隔和「静止降频」。

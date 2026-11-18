@@ -112,8 +112,17 @@ order is still undocumented; the parser accepts the common
 variant, validates every field (plausible size, finite scale in 0.5–8.0), keeps
 the raw body, and returns `Unknown` rather than inventing values. The client logs
 cursor hotspot/size and display pixel size/scale/id; nothing is applied to the
-viewport until a real capture confirms the ordering. Captured 1107/1109/1110
-byte sequences and synthetic 1105 candidates are embedded in tests.
+viewport.
+
+**Standard-RFB limit (2026-11-18):** with a BetterDisplay virtual display
+(8960×2880 combined), PointerPos(-232)/1104/1105/1107/1109/1110 requested, remote
+pointer motion and a physical display-mode change, the server still emitted only
+1107/1109/1110. It did not emit 1104 or 1105. 1105 therefore appears to belong to
+Apple's high-performance extension (`SetDisplayConfiguration` 0x1d /
+`AppleDisplayLayout` 0x451, encrypted record layer), not the standard RFB path.
+The inferred 1105 parser is retained only as a validated diagnostic for a future
+capture; it is not used for viewport geometry. 1104's shape is provided by the
+standard Cursor pseudo-encoding (-239) when the server sends it.
 
 ## Also fixed here: the 5K framebuffer cap
 

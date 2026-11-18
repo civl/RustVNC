@@ -10,7 +10,7 @@ use rustvnc_agent_client::{
 };
 use rustvnc_client::config::{
     AuthMode, ClientConfig, EncodingPreference, KeyMapping, ModifierTarget, QualityPreset,
-    ResolutionPreset, SecurityMode,
+    ResolutionPreset, SecurityMode, ViewMode,
 };
 use rustvnc_client::credentials::CredentialStore;
 use rustvnc_client::input::{key_to_keysym, text_to_keysyms};
@@ -1153,6 +1153,20 @@ impl App {
                     if ui.button(lang.t("全屏 F11", "Fullscreen F11")).clicked() {
                         self.toggle_fullscreen(ctx);
                     }
+                    let current_view = self.draft.config.view_mode;
+                    let mut selected_view = current_view;
+                    egui::ComboBox::from_id_salt("session-view")
+                        .selected_text(current_view.label())
+                        .show_ui(ui, |ui| {
+                            for view in ViewMode::ALL {
+                                ui.selectable_value(&mut selected_view, view, view.label());
+                            }
+                        });
+                    if selected_view != current_view {
+                        self.draft.config.view_mode = selected_view;
+                        self.save_profile();
+                    }
+                    ui.label(lang.t("视图", "View"));
                     let current = self.draft.config.quality;
                     egui::ComboBox::from_id_salt("session-quality")
                         .selected_text(current.label())
@@ -1195,14 +1209,22 @@ impl App {
         };
 
         let size = egui::vec2(self.frame.width as f32, self.frame.height as f32);
-        let fit = (available.x / size.x).min(available.y / size.y);
-        // Windowed mode never enlarges the remote screen (it would only blur);
-        // fullscreen fills the display, which is the point of asking for it.
-        let scale = if chrome { fit.min(1.0) } else { fit };
+        let ppp = ctx.pixels_per_point().max(0.1);
+        let scale = self.draft.config.view_mode.scale(ppp).unwrap_or_else(|| {
+            let fit = (available.x / size.x).min(available.y / size.y);
+            // Windowed mode never enlarges beyond 1:1; fullscreen may fill.
+            if chrome { fit.min(1.0) } else { fit }
+        });
         let display = size * scale;
         let image = egui::Image::new(egui::load::SizedTexture::new(texture.id(), display))
             .sense(egui::Sense::click_and_drag());
-        let response = if chrome {
+        let needs_scroll = display.x > available.x || display.y > available.y;
+        let response = if needs_scroll {
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .show(ui, |ui| ui.add(image))
+                .inner
+        } else if chrome {
             ui.add(image)
         } else {
             // Letterbox evenly instead of pinning the frame to the top-left.

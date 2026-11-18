@@ -121,6 +121,48 @@ impl KeyMapping {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ViewMode {
+    #[default]
+    Fit,
+    /// One remote pixel per physical screen pixel.
+    OneToOne,
+    Percent50,
+    Percent100,
+    Percent200,
+}
+
+impl ViewMode {
+    pub const ALL: [Self; 5] = [
+        Self::Fit,
+        Self::OneToOne,
+        Self::Percent50,
+        Self::Percent100,
+        Self::Percent200,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fit => "适应窗口",
+            Self::OneToOne => "1:1 像素",
+            Self::Percent50 => "50%",
+            Self::Percent100 => "100%",
+            Self::Percent200 => "200%",
+        }
+    }
+
+    /// Size multiplier in egui logical points for one remote pixel.
+    pub fn scale(self, pixels_per_point: f32) -> Option<f32> {
+        match self {
+            Self::Fit => None,
+            Self::OneToOne => Some(1.0 / pixels_per_point.max(0.1)),
+            Self::Percent50 => Some(0.5),
+            Self::Percent100 => Some(1.0),
+            Self::Percent200 => Some(2.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ResolutionPreset {
     #[default]
     Native,
@@ -257,6 +299,9 @@ pub struct ClientConfig {
     /// Opt-in display-mode request applied at session start through the agent.
     #[serde(default)]
     pub resolution: ResolutionPreset,
+    /// Remote-screen zoom policy (M2a). Applies immediately, no reconnect.
+    #[serde(default)]
+    pub view_mode: ViewMode,
     /// Adapt the request rate to measured frame latency (M2b). When false, the
     /// configured quality frame rate is used except for static-screen backoff.
     #[serde(default = "default_true")]
@@ -291,6 +336,7 @@ impl Default for ClientConfig {
             custom_fps: default_custom_fps(),
             encoding: EncodingPreference::Zrle,
             resolution: ResolutionPreset::Native,
+            view_mode: ViewMode::Fit,
             adaptive: true,
             key_mapping: KeyMapping::standard(),
             apple_encodings: false,
@@ -389,6 +435,15 @@ mod tests {
         config.apply_preset(QualityPreset::Ultra);
         assert_eq!(config.bpp, 32);
         assert_eq!(config.pixel_format().bits_per_pixel, 32);
+    }
+
+    #[test]
+    fn view_modes_scale_for_hidpi() {
+        assert_eq!(ViewMode::OneToOne.scale(2.0), Some(0.5));
+        assert_eq!(ViewMode::OneToOne.scale(1.0), Some(1.0));
+        assert_eq!(ViewMode::Percent100.scale(2.0), Some(1.0));
+        assert_eq!(ViewMode::Percent200.scale(2.0), Some(2.0));
+        assert_eq!(ViewMode::Fit.scale(2.0), None);
     }
 
     #[test]

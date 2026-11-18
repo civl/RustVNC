@@ -26,6 +26,7 @@
       <Directory Id="ProgramMenuFolder">
         <Directory Id="ApplicationProgramsFolder" Name="RustVNC" />
       </Directory>
+      <Directory Id="DesktopFolder" />
     </Directory>
 
     <DirectoryRef Id="INSTALLFOLDER">

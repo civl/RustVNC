@@ -44,6 +44,20 @@ fn real_main() -> anyhow::Result<()> {
             let options = parse_serve_options(&args[1..])?;
             return run_serve(options);
         }
+        Some("--diagnose-displays") => {
+            let text = rustvnc_agent::display::diagnose();
+            print!("{text}");
+            // A GUI launch has no stdout, so always leave a copy on disk.
+            let path = paths::agent_dir().join("displays.txt");
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::write(&path, &text) {
+                Ok(()) => println!("written: {}", path.display()),
+                Err(err) => println!("could not write {}: {err}", path.display()),
+            }
+            return Ok(());
+        }
         Some("--status") => {
             print_status();
             return Ok(());

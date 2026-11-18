@@ -340,12 +340,7 @@ impl MirrorGuard {
             .iter()
             .map(|id| (*id, CGDisplay::new(*id).mirrors_display()))
             .collect();
-        tracing::info!(
-            displays = ?ids,
-            main = CGDisplay::main().id,
-            "display layout: {} display(s) found",
-            ids.len()
-        );
+        tracing::info!("mirroring request single={single}\n{}", diagnose());
         let guard = Self { previous };
         if single {
             let main = CGDisplay::main();
@@ -403,4 +398,34 @@ impl Drop for MirrorGuard {
         let _ = CGDisplay::main()
             .complete_configuration(&config, CGConfigureOption::ConfigureForSession);
     }
+}
+
+/// Human-readable snapshot of the display configuration.
+///
+/// Written to a file as well as stdout because a menu-bar/GUI launch has no
+/// usable stdout: this is how a remote session can see what CoreGraphics
+/// actually reports while the agent runs inside the login session.
+pub fn diagnose() -> String {
+    let mut out = String::new();
+    out.push_str(&format!("main display id: {}\n", CGDisplay::main().id));
+    match CGDisplay::active_displays() {
+        Ok(ids) => {
+            out.push_str(&format!("active displays: {}\n", ids.len()));
+            for id in ids {
+                let display = CGDisplay::new(id);
+                let bounds = display.bounds();
+                out.push_str(&format!(
+                    "  id={id} main={} mirror_of={} bounds={},{} {}x{}\n",
+                    display.is_main(),
+                    display.mirrors_display(),
+                    bounds.origin.x as i64,
+                    bounds.origin.y as i64,
+                    bounds.size.width as i64,
+                    bounds.size.height as i64
+                ));
+            }
+        }
+        Err(err) => out.push_str(&format!("active displays: ERROR {err:?}\n")),
+    }
+    out
 }

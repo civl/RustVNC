@@ -47,7 +47,7 @@ Windows 客户端 ── RFB/SSH (5900) ──────────► macOS 
 | M2b 自适应请求控制器 | ✅ | 延迟 EMA + 双阈值滞回 + 4 个单测；HUD |
 | M2c 多标签 / 托盘 / 开机自启 | ✅ | 后台标签暂停；托盘显示/退出；登录时 `--minimized` |
 | M2a 视图比例 / HiDPI | ✅ 部分 | 适应/1:1/50/100/200 + 滚动；多显示器仍为合并 framebuffer |
-| M2d 安装/更新/回滚 | ✅ 部分 | Inno + WiX MSI；manifest + SHA-256 + Authenticode 校验 + 备份回滚；真证书待补 |
+| M2d 安装/更新/回滚 | ✅ 部分 | Inno + WiX MSI（CI 产物已验证）；manifest + SHA-256 + Authenticode + 回滚；真证书待补 |
 
 ### 已知限制
 

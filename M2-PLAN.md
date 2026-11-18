@@ -16,7 +16,7 @@
 | M2a | 渲染 / DPI / 多显示器 / 比例切换 | 部分完成：D3D12/Vulkan/GL/glow 回退；全屏；Fit/1:1/50/100/200 + 滚动；多显示器仍为合并 framebuffer | 本轮完成比例/DPI |
 | M2b | 自适应控制器：快/慢环、滞回、手动锁定、HUD | ✅ 本轮已实现：延迟 EMA、双阈值、HUD、开关 | 完成 |
 | M2c | 多标签 / 托盘 / 通知 / 开机自启 | ✅ 多标签、托盘、开机自启已实现；通知待做 | 完成（通知除外） |
-| M2d | MSI/Authenticode/自动更新/回滚 | 自动更新/校验/回滚 + Inno + WiX MSI CI；真实证书签名待补 | 基本完成 |
+| M2d | MSI/Authenticode/自动更新/回滚 | 自动更新/校验/回滚 + Inno + WiX MSI CI 产物已验证；真实证书签名待补 | 基本完成 |
 | M2e | 性能/内存/CPU/8 小时 soak | 未开始 | 后续 |
 
 ## M2b：自适应控制器（本轮）
@@ -66,6 +66,7 @@
 - 下载后强制 SHA-256；Windows 再用 `Get-AuthenticodeSignature` 要求 `Valid`。
 - 更新前把当前 exe 备份到 `updates/rollback/`；失败或手动“回滚”可启动旧版本。
 - 静默安装：Inno `/SILENT /NORESTART /CLOSEAPPLICATIONS`，MSI `msiexec /qn`。
+- CI 产物：`RustVNC-Setup-0.1.0.exe` 与 `RustVNC.msi`（WiX 3.14，per-user）。
 - UI：“检查更新 / 回滚”，更新窗口显示版本与说明。
 - `RUSTVNC_UPDATE_URL` 覆盖 manifest；开发可 `RUSTVNC_ALLOW_UNSIGNED_UPDATE=1` 跳过 Authenticode（默认不允许）。
 

@@ -54,10 +54,14 @@ struct Cli {
     /// Send a pointer move/click and an "A" key once (types into the focused app!)
     #[arg(long)]
     input_test: bool,
-    /// Move the remote pointer in a small square for the first 3 seconds.
-    /// This makes macOS emit Apple 1104 cursor updates without clicking.
+    /// Move the remote pointer for the first 3 seconds; macOS emits Apple 1104
+    /// when the cursor shape changes (not merely when it moves).
     #[arg(long)]
     wiggle: bool,
+    /// Optional remote coordinate `x,y` for --wiggle. The script points this at
+    /// the terminal's text area so the arrow ⇄ I-beam transition triggers 1104.
+    #[arg(long)]
+    hover: Option<String>,
     /// Print RFB version and security types, then exit
     #[arg(long)]
     inspect: bool,
@@ -136,6 +140,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     if cli.apple {
         for encoding in [
+            VncEncoding::PointerPosPseudo,
             VncEncoding::AppleCursorPseudo,
             VncEncoding::AppleDisplayPseudo,
             VncEncoding::AppleCapabilitiesPseudo,
@@ -191,6 +196,10 @@ async fn run(cli: Cli) -> Result<()> {
     let mut input_sent = false;
     let mut next_wiggle = Instant::now();
     let mut wiggle_index = 0i32;
+    let hover = cli.hover.as_deref().and_then(|value| {
+        let (x, y) = value.split_once(',')?;
+        Some((x.trim().parse::<u16>().ok()?, y.trim().parse::<u16>().ok()?))
+    });
     let start = Instant::now();
     let deadline = start + Duration::from_secs(cli.seconds);
     let mut last_refresh = Instant::now() - Duration::from_millis(50);
@@ -231,15 +240,16 @@ async fn run(cli: Cli) -> Result<()> {
         if cli.wiggle && start.elapsed() < Duration::from_secs(3) && next_wiggle <= Instant::now() {
             let width = framebuffer.width.max(200) as u16;
             let height = framebuffer.height.max(200) as u16;
-            let offsets = [(0i32, 0i32), (80, 0), (80, 80), (0, 80)];
-            let (dx, dy) = offsets[(wiggle_index as usize) % offsets.len()];
+            let (x, y) = if wiggle_index % 2 == 0 {
+                hover.unwrap_or((width / 2, height / 2))
+            } else {
+                (10, 10)
+            };
             wiggle_index = wiggle_index.wrapping_add(1);
-            let x = (width / 2) as i32 + dx;
-            let y = (height / 2) as i32 + dy;
             client
                 .input(X11Event::PointerEvent(ClientMouseEvent {
-                    position_x: x.clamp(0, width as i32 - 1) as u16,
-                    position_y: y.clamp(0, height as i32 - 1) as u16,
+                    position_x: x.min(width.saturating_sub(1)),
+                    position_y: y.min(height.saturating_sub(1)),
                     bottons: 0,
                 }))
                 .await?;

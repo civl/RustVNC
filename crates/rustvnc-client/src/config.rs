@@ -348,6 +348,7 @@ impl ClientConfig {
         // Cursor shapes are only defined for 32 bpp in this engine, and the UI
         // draws the local pointer anyway; at 16 bpp the updates would be
         // discarded and only cost bandwidth.
+        encodings.push(VncEncoding::PointerPosPseudo);
         if self.bpp == 32 {
             encodings.push(VncEncoding::CursorPseudo);
         }

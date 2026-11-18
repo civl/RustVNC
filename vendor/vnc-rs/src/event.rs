@@ -74,6 +74,9 @@ pub enum VncEvent {
     /// According to [RFC6143, section-7.8.1](https://www.rfc-editor.org/rfc/rfc6143.html#section-7.8.1)
     ///
     SetCursor(Rect, ImageData),
+    /// Pointer position pseudo-encoding (-232); the rectangle x/y is the
+    /// position and the size is zero.
+    PointerPosition { x: u16, y: u16 },
     /// Payload of an Apple private pseudo-encoding (1104 cursor, 1105 display
     /// geometry, 1107 capabilities, 1109 keyboard layout, 1110 machine model).
     ///

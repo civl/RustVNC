@@ -545,6 +545,7 @@ where
                     if !matches!(
                         rect.encoding,
                         VncEncoding::CursorPseudo
+                            | VncEncoding::PointerPosPseudo
                             | VncEncoding::ExtendedDesktopSizePseudo
                             | VncEncoding::LastRectPseudo
                     ) && !rect.encoding.is_apple_pseudo()
@@ -592,6 +593,13 @@ where
                         }
                         VncEncoding::CursorPseudo => {
                             cursor.decode(pf, &rect.rect, stream, output_func).await?;
+                        }
+                        VncEncoding::PointerPosPseudo => {
+                            output_func(VncEvent::PointerPosition {
+                                x: rect.rect.x,
+                                y: rect.rect.y,
+                            })
+                            .await?;
                         }
                         VncEncoding::ExtendedDesktopSizePseudo => {
                             let update = crate::DesktopUpdate::read(stream, rect.rect).await?;

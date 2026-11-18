@@ -30,12 +30,19 @@ export VNC_PASSWORD
 # The probe runs in the background so we can move the remote pointer and
 # change the display mode while it is connected. macOS only emits 1104 on
 # pointer motion and 1105 on a display-geometry change.
+HOVER_ARGS=()
+if BOUNDS=$(osascript -e 'tell application "Terminal" to get bounds of front window' 2>/dev/null); then
+  # "x1, y1, x2, y2" in global screen coordinates; point at the text area.
+  HOVER_ARGS=(--hover "$(awk -F, '{print int(($1+$3)/2) "," int(($2+$4)/2)}' <<<"$BOUNDS")")
+fi
+
 cargo run --quiet -p rfb-probe -- \
   --host "$HOST" \
   --port "$PORT" \
   --user "$USER_NAME" \
   --apple \
   --wiggle \
+  "${HOVER_ARGS[@]}" \
   --seconds "$SECONDS_TO_RUN" \
   --save target/apple-capture/last-frame.png \
   >"$OUT" 2>&1 &

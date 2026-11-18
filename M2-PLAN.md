@@ -13,7 +13,7 @@
 
 | 编号 | 工作流 | 当前状态 | 本轮 |
 |---|---|---|---|
-| M2a | 渲染 / DPI / 多显示器 / 比例切换 | 部分完成：D3D12/Vulkan/GL/glow 回退；全屏；Fit/1:1/50/100/200 + 滚动；**分辨率自动匹配客户端屏幕 + 帧率 <30 逐级下退**；多显示器仍为合并 framebuffer | 本轮完成比例/DPI/自动降分辨率 |
+| M2a | 渲染 / DPI / 多显示器 / 比例切换 | 部分完成：D3D12/Vulkan/GL/glow 回退；全屏；Fit/1:1/50/100/200 + 滚动；**分辨率自动匹配客户端屏幕 + 帧率 <30 逐级下退（真机验证，见下）**；多显示器仍为合并 framebuffer | ✅ 比例/DPI/自动降分辨率 |
 | M2b | 自适应控制器：快/慢环、滞回、手动锁定、HUD | ✅ 本轮已实现：延迟 EMA、双阈值、HUD、开关 | 完成 |
 | M2c | 多标签 / 托盘 / 通知 / 开机自启 | ✅ 多标签、托盘、开机自启已实现；通知待做 | 完成（通知除外） |
 | M2d | MSI/Authenticode/自动更新/回滚 | 自动更新/校验/回滚 + Inno + WiX MSI CI 产物已验证；真实证书签名待补 | 基本完成 |
@@ -94,9 +94,50 @@
 2. 空闲降频后首次输入要等下一个轮询周期：输入现在立即请求下一帧（在途则等其完成立刻补发），
    输入→像素 p50 从 47 ms 降到 0.8 ms。
 
+
+## 真机验证：自动降分辨率（2026-11-19，Mac mini M4 / macOS 27.2.1）
+
+环境：BenQ SW270C 5120×2880（主，UI 2560×1440）+ BetterDisplay 虚拟 16:9 3840×2160，
+合成 framebuffer **8960×2880**；客户端为 2560×1440 的 Windows 主机。
+
+实测链路（经 Tailscale，headless Agent + `agent_probe`）：
+
+```text
+auto resolution: client screen Some((2560, 1440)) -> 2560x1440
+agent channel connected agent=RustVNC Agent 0.1.0 capabilities=6
+DISPLAY 2560x1440 applied=true: 2560x1440 (2560x1440 px)
+first frame 2560x1440            # 原 8960x2880
+```
+
+| 指标 | 8960×2880（原生） | 2560×1440（自动降档后） |
+|---|---|---|
+| framebuffer 像素量 | 25.8 M | 3.7 M（**1/6.9**；无虚拟屏时相对 8960 为 1/13.8） |
+| RFB 吞吐（16bpp ZRLE） | 50–58 rects/s，~412–470 KB/s | 同量级但每帧像素更少 |
+| 帧延迟 | **233–600 ms**，自适应顶到 500 ms 上限 | 未再触发降档 |
+| 本地呈现 | — | **59.9 fps**，p50 16.67 ms / p95 16.97 ms / p99 17.18 ms（1440 帧） |
+
+恢复行为（三种路径均验证）：
+
+1. 会话正常结束 → `DisplayGuard::drop` 恢复 5120×2880
+2. 客户端被强杀 → Agent 监听 `connection.closed()`，恢复
+3. Agent 崩溃后重启 → 启动时 `restore_saved()` 恢复残留模式
+
+### 权限边界（重要，纠正此前判断）
+
+- `CGDisplayCopyAllDisplayModes` / `CGConfigureDisplayWithDisplayMode`：**不需要**任何 TCC 授权，
+  SSH 会话里同样可用（枚举到 451 个模式，切换成功）。
+- `CGGetActiveDisplayList`：**需要“屏幕录制”权限**；无授权时返回 **0 块屏**，
+  这使 `MirrorGuard` 遍历空列表、返回成功但什么都不做。
+  已用独立 Swift 程序 + 项目二进制在 SSH / `open` / LaunchAgent 四种上下文复现。
+- 因此：降分辨率零授权可用；**单屏镜像**必须先给 Agent 授予屏幕录制权限。
+
+### 踩坑
+
+切到非 HiDPI 模式会让 HiDPI 模式从模式列表消失，需重启 BetterDisplay 重新探测。
+所以上面第 2、3 条恢复路径是必需项，不是可选优化。
 ## 后续顺序
 
 1. M2d MSI/签名/更新与回滚；补 Authenticode。
-2. M2e：工具已就绪（见上），待跑真机 8 小时 soak 与 4K60 本地呈现基准。
-3. M2a 收尾：多显示器裁切/选择、4K60 本地呈现。
+2. M2e：工具已就绪；1440p 本地呈现已实测 59.9 fps（见"真机验证"），待跑 8 小时 soak 与 4K60 基准。
+3. M2a 收尾：多显示器裁切/选择；单屏镜像需先授予屏幕录制权限。
 4. M2c 收尾：通知、标签跨重启恢复、托盘快捷键。

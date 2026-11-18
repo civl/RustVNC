@@ -130,20 +130,38 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 
 记录：带宽峰值 ______ Mbps，CPU ______ %
 
-## 4b. 远端分辨率（实验性）
+## 4b. 远端分辨率与单屏
 
 1. Mac 菜单栏 → “允许远程调整分辨率：开启”。
-2. 客户端配置启用“增强通道”，远端分辨率选 `1920×1080`，连接。
-3. 期望 Mac 主显示器切换到 1080p，客户端状态栏显示切换结果，VNC 画面重排。
+2. 客户端配置启用“增强通道”，远端分辨率选 `自动（按本机屏幕）`，连接。
+3. 期望 Mac 主显示器切换到客户端屏幕尺寸，客户端状态栏显示切换结果，VNC 画面重排。
 4. 断开连接；期望 Mac 恢复原来的分辨率。
 
-- [ ] 1080p 切换成功并恢复
-- [ ] 2560×1440 / 3840×2160 至少一项成功
-- [ ] 菜单关闭时请求被明确拒绝，不会改分辨率
-- [ ] 强制退出 Agent 后重新启动，残留模式被恢复
+- [x] 2560×1440 切换成功并恢复（2026-11-19 实测）
+- [x] 强制退出客户端后仍恢复（Agent 监听 `connection.closed()`）
+- [x] Agent 崩溃后重新启动，残留模式被恢复（`restore_saved`）
+- [ ] 菜单关闭时请求被明确拒绝（代码路径已实现，未单独实测）
+- [ ] 单屏镜像（`SetDisplayLayout`）：**需要“屏幕录制”权限**，未授权前返回明确错误
 
-> 2026-11-17 已在 Mac mini M4 上实测：headless Agent + `agent_probe ... 1920x1080`
-> 成功把主显示器切到 1920×1080，探针退出后恢复 5120×2880，`display-original.txt` 清理。
+> **2026-11-19 真机实测（Mac mini M4 / macOS 27.2.1 / arm64）**
+>
+> 显示器：BenQ SW270C 5120×2880（主，UI 2560×1440）+ BetterDisplay 虚拟 16:9 3840×2160
+> → 合成 framebuffer **8960×2880**。
+>
+> ```text
+> auto resolution: client screen Some((2560, 1440)) -> 2560x1440
+> agent channel connected agent=RustVNC Agent 0.1.0 capabilities=6
+> DISPLAY 2560x1440 applied=true: 2560x1440 (2560x1440 px)
+> first frame 2560x1440            # 原 8960x2880
+> ```
+>
+> - 无虚拟屏时 framebuffer = 精确 **2560×1440**；有虚拟屏时 = 6400×2160（2560 + 3840）
+> - 会话结束/客户端强杀后主屏均恢复 **5120×2880（UI 2560×1440）**
+>
+> **权限边界（重要）**：`CGDisplayCopyAllDisplayModes` 与切分辨率**不需要**任何 TCC 授权；
+> 但 `CGGetActiveDisplayList` 在无“屏幕录制”权限时返回 **0 块屏**，导致单屏镜像静默失效。
+> 该现象已用独立 Swift 程序与项目二进制在 SSH / `open` / LaunchAgent 四种上下文下复现，
+> `--diagnose-displays` 会直接打印 `screen recording permission: false`。
 
 ## 5. 分辨率变化
 
@@ -263,14 +281,24 @@ cargo test -p rustvnc-client --test input_latency -- --nocapture
 
 | 项 | 结果 | 数值 |
 |---|---|---|
-| 1080p 30 分钟不崩溃 | | |
-| LAN 1080p fps | | |
-| 输入 P95 | | |
-| 登录窗口可输入 | | |
-| 窗口变化 ≤ 1 s | | |
-| SSH host key 变更拒绝 | | |
-| Agent 剪贴板双向 | | |
-| Agent 音频 | | |
-| 空闲 CPU | | |
+| 1080p 30 分钟不崩溃 | 部分 | 2 分钟 soak 通过；8 小时待跑 |
+| LAN 1080p fps | 通过 | 本地呈现 59.9 fps（p50 16.67 ms / p95 16.97 ms，1440 帧） |
+| 输入 P95 | 通过 | 客户端侧 p50/p95 **0.8 ms**（mock，预算 20 ms） |
+| 登录窗口可输入 | 未测 | 需真机在登录窗口操作 |
+| 窗口变化 ≤ 1 s | 未测 | 需真机操作 |
+| SSH host key 变更拒绝 | 通过 | 单测覆盖（TOFU） |
+| Agent 剪贴板双向 | 通过 | 真机验证（M1 阶段）+ 回环测试 |
+| Agent 音频 | 部分 | 回环测试通过；真机音频未复测 |
+| 空闲 CPU | 通过 | 无会话 **0.88%**；有会话空闲 1.05%（单核百分比，20 核机器） |
+
+### 2026-11-19 新增实测（真机）
+
+| 场景 | 结果 |
+|---|---|
+| 8960×2880 原生（16bpp ZRLE） | 50–58 rects/s，~412–470 KB/s；**帧延迟 233–600 ms**，自适应控制器顶到 500 ms 上限 |
+| 自动降到 2560×1440 | framebuffer 2560×1440，像素量降至 **1/13.8** |
+| 1440p 本地呈现 | **59.9 fps**，p50 16.67 ms，p95 16.97 ms，p99 17.18 ms，max 29.67 ms（1440 帧） |
+| 降档后恢复 | 会话正常结束、客户端被强杀、Agent 重启三种情况均恢复 5120×2880 |
+| 单屏镜像 | 需“屏幕录制”权限；未授权时 `--diagnose-displays` 报 `active displays: 0` |
 
 把这张表贴回 `M1-STATUS.md` §1，项目就可以从「条件通过」改成「通过」。

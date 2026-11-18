@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use core_foundation::array::CFArray;
 use core_foundation::base::TCFType;
+use core_graphics::base::CGDirectDisplayID;
 use core_graphics::display::{
     CGConfigureOption, CGDisplay, CGDisplayCopyAllDisplayModes, CGDisplayMode, CGDisplayModeRetain,
 };
@@ -316,5 +317,84 @@ mod tests {
         let restored = display.display_mode().expect("restored mode");
         assert_eq!(restored.width(), current.width());
         assert_eq!(restored.height(), current.height());
+    }
+}
+
+/// Mirrors every display onto the main one (single-screen mode) and restores the
+/// previous mirroring layout when dropped.
+///
+/// Mirroring is the only way to make macOS Screen Sharing send one screen: the
+/// RFB framebuffer is whatever CGDisplay reports, and a mirrored set collapses to
+/// a single surface.
+pub struct MirrorGuard {
+    previous: Vec<(CGDirectDisplayID, CGDirectDisplayID)>,
+}
+
+impl MirrorGuard {
+    /// `single = true` mirrors everything onto the main display; `false` unmirrors
+    /// every display that is currently mirroring.
+    pub fn apply(single: bool) -> Result<Self> {
+        let ids = CGDisplay::active_displays()
+            .map_err(|err| anyhow::anyhow!("enumerate displays: {err:?}"))?;
+        let previous: Vec<(CGDirectDisplayID, CGDirectDisplayID)> = ids
+            .iter()
+            .map(|id| (*id, CGDisplay::new(*id).mirrors_display()))
+            .collect();
+        let guard = Self { previous };
+        if single {
+            let main = CGDisplay::main();
+            let config = main
+                .begin_configuration()
+                .map_err(|err| anyhow::anyhow!("begin display configuration: {err:?}"))?;
+            for id in &ids {
+                let display = CGDisplay::new(*id);
+                if display.is_main() {
+                    continue;
+                }
+                if let Err(err) = display.configure_display_mirror_of_display(&config, &main) {
+                    let _ = main.cancel_configuration(&config);
+                    bail!("mirror display {id} onto the main one: {err:?}");
+                }
+            }
+            main.complete_configuration(&config, CGConfigureOption::ConfigureForSession)
+                .map_err(|err| anyhow::anyhow!("complete display configuration: {err:?}"))?;
+        } else {
+            let config = CGDisplay::main()
+                .begin_configuration()
+                .map_err(|err| anyhow::anyhow!("begin display configuration: {err:?}"))?;
+            let none = CGDisplay::new(0);
+            for id in &ids {
+                let display = CGDisplay::new(*id);
+                if display.mirrors_display() == 0 && !display.is_main() {
+                    continue;
+                }
+                if let Err(err) = display.configure_display_mirror_of_display(&config, &none) {
+                    let _ = CGDisplay::main().cancel_configuration(&config);
+                    bail!("unmirror display {id}: {err:?}");
+                }
+            }
+            CGDisplay::main()
+                .complete_configuration(&config, CGConfigureOption::ConfigureForSession)
+                .map_err(|err| anyhow::anyhow!("complete display configuration: {err:?}"))?;
+        }
+        Ok(guard)
+    }
+}
+
+impl Drop for MirrorGuard {
+    fn drop(&mut self) {
+        let Ok(config) = CGDisplay::main().begin_configuration() else {
+            return;
+        };
+        for (id, master) in &self.previous {
+            let display = CGDisplay::new(*id);
+            if display.mirrors_display() == *master {
+                continue;
+            }
+            let target = CGDisplay::new(*master);
+            let _ = display.configure_display_mirror_of_display(&config, &target);
+        }
+        let _ = CGDisplay::main()
+            .complete_configuration(&config, CGConfigureOption::ConfigureForSession);
     }
 }

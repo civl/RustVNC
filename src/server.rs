@@ -420,6 +420,7 @@ async fn handle_connection(
             };
             let mut last_received = String::new();
             let mut display: Option<DisplayGuard> = None;
+            let mut _mirror: Option<display::MirrorGuard> = None;
 
             loop {
                 tokio::select! {
@@ -442,7 +443,53 @@ async fn handle_connection(
                                     }
                                 }
                             }
-                            Some(ControlMsg::SetDisplayMode { width, height }) => {
+                            Some(ControlMsg::SetDisplayLayout { single }) => {
+                                let allowed = session_options
+                                    .allow_resolution
+                                    .load(Ordering::Relaxed);
+                                let response = if !allowed {
+                                    protocol::ControlMsg::DisplayLayoutResult {
+                                        single,
+                                        applied: false,
+                                        message: "显示器布局控制已在 Mac 菜单栏关闭".to_string(),
+                                    }
+                                } else if single {
+                                    match display::MirrorGuard::apply(true) {
+                                        Ok(guard) => {
+                                            _mirror = Some(guard);
+                                            protocol::ControlMsg::DisplayLayoutResult {
+                                                single: true,
+                                                applied: true,
+                                                message: "已镜像为单屏".to_string(),
+                                            }
+                                        }
+                                        Err(err) => protocol::ControlMsg::DisplayLayoutResult {
+                                            single,
+                                            applied: false,
+                                            message: format!("{err:#}"),
+                                        },
+                                    }
+                                } else {
+                                    // Dropping the guard restores the layout that
+                                    // existed before single-screen mode.
+                                    _mirror = None;
+                                    match display::MirrorGuard::apply(false) {
+                                        Ok(_) => protocol::ControlMsg::DisplayLayoutResult {
+                                            single: false,
+                                            applied: true,
+                                            message: "已恢复多屏布局".to_string(),
+                                        },
+                                        Err(err) => protocol::ControlMsg::DisplayLayoutResult {
+                                            single,
+                                            applied: false,
+                                            message: format!("{err:#}"),
+                                        },
+                                    }
+                                };
+                                if protocol::write_msg(&mut send, &response).await.is_err() {
+                                    break;
+                                }
+                            }                            Some(ControlMsg::SetDisplayMode { width, height }) => {
                                 let result = if !session_options.allow_resolution.load(Ordering::Relaxed) {
                                     Err(anyhow::anyhow!(
                                         "远程分辨率控制已在 Mac 菜单栏关闭"

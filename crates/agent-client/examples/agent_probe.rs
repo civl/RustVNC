@@ -136,6 +136,11 @@ async fn main() -> Result<()> {
                 AgentEvent::Clipboard(text) => {
                     println!("CLIPBOARD from agent: {} bytes", text.len())
                 }
+                AgentEvent::DisplayLayoutResult {
+                    single,
+                    applied,
+                    message,
+                } => println!("LAYOUT single={single} applied={applied}: {message}"),
                 AgentEvent::DisplayModeResult {
                     width,
                     height,

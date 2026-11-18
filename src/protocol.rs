@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub const PROTO_VERSION: u16 = 1;
 pub const CAP_AUDIO: u32 = 1 << 0;
 pub const CAP_DISPLAY: u32 = 1 << 1;
+/// The agent can switch between single-screen (mirrored) and multi-screen.
+pub const CAP_LAYOUT: u32 = 1 << 2;
 
 pub const AUDIO_VERSION: u8 = 1;
 pub const AUDIO_HEADER_LEN: usize = 7;
@@ -90,6 +92,18 @@ pub enum ControlMsg {
     DisplayModeResult {
         width: u16,
         height: u16,
+        applied: bool,
+        message: String,
+    },
+    /// Ask the macOS agent to stream a single screen (mirror every display onto
+    /// the main one, so the framebuffer shrinks to one screen) or restore the
+    /// normal multi-display layout.
+    SetDisplayLayout {
+        single: bool,
+    },
+    /// Result of [`ControlMsg::SetDisplayLayout`].
+    DisplayLayoutResult {
+        single: bool,
         applied: bool,
         message: String,
     },

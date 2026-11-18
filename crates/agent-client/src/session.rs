@@ -67,6 +67,7 @@ pub struct SessionConfig {
 pub enum AgentCommand {
     ClipboardText(String),
     SetDisplayMode { width: u16, height: u16 },
+    SetDisplayLayout { single: bool },
     Stop,
 }
 
@@ -82,6 +83,12 @@ pub enum AgentEvent {
     DisplayModeResult {
         width: u16,
         height: u16,
+        applied: bool,
+        message: String,
+    },
+    /// Result of a single/multi screen layout request.
+    DisplayLayoutResult {
+        single: bool,
         applied: bool,
         message: String,
     },
@@ -144,6 +151,13 @@ impl AgentSession {
         let _ = self
             .commands
             .send(AgentCommand::SetDisplayMode { width, height });
+    }
+
+    /// Ask the Mac to stream a single screen (mirrored) or restore multi-screen.
+    pub fn set_display_layout(&self, single: bool) {
+        let _ = self
+            .commands
+            .send(AgentCommand::SetDisplayLayout { single });
     }
 
     pub fn stop(&mut self) {
@@ -471,6 +485,16 @@ async fn connect_and_run(
                         break Err(err);
                     }
                 }
+                Some(AgentCommand::SetDisplayLayout { single }) => {
+                    if let Err(err) = protocol::write_msg(
+                        &mut send,
+                        &ControlMsg::SetDisplayLayout { single },
+                    )
+                    .await
+                    {
+                        break Err(err);
+                    }
+                }
                 Some(AgentCommand::SetDisplayMode { width, height }) => {
                     if let Err(err) = protocol::write_msg(
                         &mut send,
@@ -490,7 +514,17 @@ async fn connect_and_run(
                 Some(ControlMsg::ClipboardText { text }) => {
                     let _ = events.send(AgentEvent::Clipboard(text));
                 }
-                Some(ControlMsg::DisplayModeResult {
+                Some(ControlMsg::DisplayLayoutResult {
+                    single,
+                    applied,
+                    message,
+                }) => {
+                    let _ = events.send(AgentEvent::DisplayLayoutResult {
+                        single,
+                        applied,
+                        message,
+                    });
+                }                Some(ControlMsg::DisplayModeResult {
                     width,
                     height,
                     applied,

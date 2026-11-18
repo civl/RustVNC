@@ -1086,6 +1086,7 @@ impl App {
         }) {
             Ok(session) => {
                 self.agent_status = "连接 Agent…".to_string();
+                session.set_display_layout(self.draft.config.single_display);
                 if let Some((width, height)) = self.pending_resolution {
                     session.set_display_mode(width, height);
                     self.agent_status = format!("连接 Agent…（请求分辨率 {width}×{height}）");
@@ -1165,6 +1166,21 @@ impl App {
                     }
                 }
                 AgentEvent::AudioStopped => {}
+                AgentEvent::DisplayLayoutResult {
+                    single,
+                    applied,
+                    message,
+                } => {
+                    self.agent_status = if applied {
+                        if single {
+                            "已切为单屏（镜像）".to_string()
+                        } else {
+                            "已恢复多屏".to_string()
+                        }
+                    } else {
+                        format!("显示器布局切换失败：{message}")
+                    };
+                }
                 AgentEvent::DisplayModeResult {
                     width,
                     height,
@@ -1725,6 +1741,23 @@ impl App {
                             );
                         }
                     });
+                ui.end_row();
+
+                ui.label(lang.t("Mac 显示器", "Mac displays"));
+                ui.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut self.draft.config.single_display,
+                        lang.t("只显示单屏（镜像）", "single screen (mirrored)"),
+                    );
+                    ui.label(
+                        egui::RichText::new(lang.t(
+                            "勾选后由 Agent 把多屏镜像成单屏，帧缓冲随之变小；取消则恢复多屏",
+                            "the Agent mirrors the displays into one, shrinking the framebuffer",
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                });
                 ui.end_row();
 
                 if self.draft.config.quality == QualityPreset::Custom {

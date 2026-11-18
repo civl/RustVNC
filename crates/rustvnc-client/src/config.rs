@@ -342,6 +342,10 @@ pub struct ClientConfig {
     /// Opt-in display-mode request applied at session start through the agent.
     #[serde(default)]
     pub resolution: ResolutionPreset,
+    /// Stream a single screen: the agent mirrors every Mac display onto the main
+    /// one, so the framebuffer (and its cost) collapses to one screen.
+    #[serde(default)]
+    pub single_display: bool,
     /// Remote-screen zoom policy (M2a). Applies immediately, no reconnect.
     #[serde(default)]
     pub view_mode: ViewMode,
@@ -378,7 +382,8 @@ impl Default for ClientConfig {
             bpp: 32,
             custom_fps: default_custom_fps(),
             encoding: EncodingPreference::Zrle,
-            resolution: ResolutionPreset::Native,
+            resolution: ResolutionPreset::Auto,
+            single_display: false,
             view_mode: ViewMode::Fit,
             adaptive: true,
             key_mapping: KeyMapping::standard(),

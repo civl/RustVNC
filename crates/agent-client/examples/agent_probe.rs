@@ -41,10 +41,17 @@ async fn main() -> Result<()> {
     // `noaudio` as the 4th argument asks the agent not to start capture, which
     // isolates audio-init stalls (TCC prompts) from control-plane problems.
     let audio = args.get(3).map(|value| value != "noaudio").unwrap_or(true);
-    let display = args.get(4).and_then(|value| {
+    // The 5th argument is either a resolution ("2560x1440") or a layout
+    // ("single" / "multi"), so one probe run can exercise either feature.
+    let mode = args.get(4).cloned();
+    let display = mode.as_ref().and_then(|value| {
         let (width, height) = value.split_once('x')?;
         Some((width.parse::<u16>().ok()?, height.parse::<u16>().ok()?))
     });
+    let layout = mode
+        .as_deref()
+        .filter(|value| *value == "single" || *value == "multi")
+        .map(str::to_string);
     let state_dir = default_state_dir();
     println!("addr      {addr}");
     println!("state dir {}", state_dir.display());
@@ -122,6 +129,7 @@ async fn main() -> Result<()> {
     let mut last_beat = 0u64;
     let mut sent_clipboard = false;
     let mut sent_display = false;
+    let mut sent_layout = false;
     let mut connected = false;
     while std::time::Instant::now() < deadline {
         while let Some(event) = session.try_recv() {
@@ -163,6 +171,14 @@ async fn main() -> Result<()> {
         {
             session.set_display_mode(width, height);
             sent_display = true;
+        }
+        if connected
+            && !sent_layout
+            && let Some(layout) = &layout
+        {
+            session.set_display_layout(layout == "single");
+            println!("requesting layout: {layout}");
+            sent_layout = true;
         }
         let elapsed = started.elapsed().as_secs();
         if elapsed >= last_beat + 10 {

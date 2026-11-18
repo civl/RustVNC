@@ -376,6 +376,8 @@ async fn handle_connection(
             }
 
             capabilities |= protocol::CAP_DISPLAY;
+            // Single-screen (mirroring) control rides on the same menu-bar gate.
+            capabilities |= protocol::CAP_LAYOUT;
             protocol::write_msg(
                 &mut send,
                 &ControlMsg::ServerHello {

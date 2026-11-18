@@ -289,11 +289,17 @@ impl FramePacer {
         }
     }
 
+    /// Snap back to the active cadence — the adaptive interval, not the
+    /// configured one, so a measured slowdown is kept.
+    fn note_activity(&mut self) {
+        self.quiet_frames = 0;
+        self.current = self.adaptive_interval.max(self.base);
+    }
+
     fn on_frame(&mut self, had_content: bool, latency: Duration) {
         self.observe_latency(latency);
         if had_content {
-            self.quiet_frames = 0;
-            self.current = self.adaptive_interval.max(self.base);
+            self.note_activity();
             return;
         }
         self.quiet_frames = self.quiet_frames.saturating_add(1);
@@ -535,6 +541,9 @@ async fn connect_and_loop(
     // Whether the frame currently being decoded carried any pixels; used to
     // decide between the active and the idle cadence.
     let mut frame_had_content = false;
+    // Input arrived while a frame was in flight: request the next one the moment
+    // the channel frees up instead of waiting for the tick.
+    let mut refresh_after_input = false;
     let mut next_request = tokio::time::Instant::now();
 
     let _ = events.send(SessionEvent::Connected {
@@ -572,6 +581,20 @@ async fn connect_and_loop(
                             });
                             return Err(failure);
                         }
+                        // Typing or clicking almost always repaints the remote
+                        // screen, so ask for the result immediately instead of
+                        // waiting for the next scheduled poll (up to a quarter of
+                        // a second when idle, or a full interval while streaming).
+                        // The single-in-flight guard keeps this from flooding.
+                        pacer.note_activity();
+                        if update_in_flight {
+                            refresh_after_input = true;
+                        } else {
+                            update_in_flight = true;
+                            in_flight_since = Instant::now();
+                            let _ = client.input(X11Event::Refresh).await;
+                        }
+                        next_request = tokio::time::Instant::now() + pacer.delay();
                     }
                     Some(SessionCommand::Close) | None => break,
                 }
@@ -604,7 +627,19 @@ async fn connect_and_loop(
                         }
                         VncEvent::UpdateComplete => {
                             update_in_flight = false;
-                            pacer.on_frame(frame_had_content, in_flight_since.elapsed());
+                            // Measure before anything below can reset the clock.
+                            let latency = in_flight_since.elapsed();
+                            // An input that arrived while this frame was in
+                            // flight could not be reflected in it, so ask for the
+                            // next one right now instead of waiting for the tick.
+                            if refresh_after_input {
+                                refresh_after_input = false;
+                                update_in_flight = true;
+                                in_flight_since = Instant::now();
+                                let _ = client.input(X11Event::Refresh).await;
+                                next_request = tokio::time::Instant::now() + pacer.delay();
+                            }
+                            pacer.on_frame(frame_had_content, latency);
                             frame_had_content = false;
                             frames += 1;
                             let _ = events.send(SessionEvent::FrameComplete);

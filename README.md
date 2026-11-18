@@ -87,9 +87,10 @@ ed25519 密钥 + `authorized_keys` 指引。host key 首次连接需显式信任
 
 | 项目 | 现状 |
 |---|---|
-| 测试 | Windows 侧 **132 个**（含 mock RFB 端到端、QUIC 回环、像素级比对）；macOS 侧由 CI 覆盖 |
+| 测试 | Windows 侧 **133 个**（含 mock RFB 端到端、QUIC 回环、像素级比对、输入延迟基准）；macOS 侧由 CI 覆盖 |
 | 质量门 | `cargo fmt --check`、`clippy -D warnings`、**debug 与 release 双模式测试**、actionlint + shellcheck |
 | 一键验收 | `powershell -File scripts/acceptance.ps1`（8 步，含真机探针） |
+| 性能预算 | `scripts/bench-soak.ps1`（CPU/内存/句柄 + 稳态回归 + 阈值判定）、`--bench-frames`（本地呈现）、`tests/input_latency.rs`（输入→像素 P95） |
 | CI | 5 个 job：Ubuntu 26.04（workflow lint / cargo-deny）、macOS 26、Windows Server 2025 ×2 |
 | 产物 | `RustVNC-Setup-*.exe`（Inno）、`RustVNC.msi`（WiX per-user） |
 

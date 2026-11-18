@@ -151,10 +151,33 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 
 - [ ] 1 秒内窗口重排，画面不拉伸变形
 
-## 6. 稳定性 soak（30 分钟）
+## 6. 稳定性 soak
+
+自动化（推荐，可无人值守；`-Connect` 用已保存的配置名）：
+
+```powershell
+# 8 小时无人值守：自动连接 + 每 10 s 采样，结束时给 PASS/FAIL
+.\scripts\bench-soak.ps1 -Minutes 480 -Connect "Mac Mini M4"
+
+# 只盯着已手动连好的客户端
+.\scripts\bench-soak.ps1 -Minutes 30 -Attach
+```
+
+产出 `target/soak/soak-<stamp>.csv` 与 `.json`，包含 CPU 均值/峰值、内存起止与峰值、
+**稳态回归斜率**（跳过开头 10% 的分配期）、句柄与线程变化，并按阈值判定：
+
+| 阈值 | 默认值 | 参数 |
+|---|---|---|
+| CPU 均值 | 15%（单核百分比） | `-MaxMeanCpuPercent` |
+| 内存每小时增长 | 20 MB | `-MaxRssGrowthMbPerHour` |
+| 句柄增长 | 50 | `-MaxHandleGrowth` |
+
+> 窗口不足 30 分钟时脚本只报数据、不判定泄漏：短窗口的风吹草动能外推成几十 MB/h。
+
+手工复核（可选，边操作边看）：
 
 1. 连接后连续操作：滚动、拖窗、打字、切换 App，每 5 分钟记录一次。
-2. 观察任务管理器内存。
+2. 观察任务管理器内存与 CPU。
 
 - [ ] 30 分钟不崩溃、不黑屏
 - [ ] 内存增长 < 50 MB
@@ -170,6 +193,18 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 | +30m | | | | |
 
 ## 7. 输入延迟（P95）
+
+客户端侧（输入 → 像素解码完成，mock 服务端、本机回环，不含网络与合成器）：
+
+```powershell
+cargo test -p rustvnc-client --test input_latency -- --nocapture
+```
+
+输出形如 `input->pixels: p50 0.8 ms · p95 0.8 ms · max 0.8 ms`，预算 20 ms。
+实测：输入触发立即请求时 ~1 ms；若只靠定时轮询则是一整个请求间隔（~47 ms），
+所以这个测试同时是"输入是否会唤醒请求"的回归保护。
+
+真机 P95（含网络与 Mac 侧合成）仍需按下方手测：连续点击 20 次并记录观感/录屏帧差。
 
 方法 A（推荐）：屏幕闪烁法 —— 在 Windows 上按一个键触发远端全屏高亮（可用特殊键菜单的
 `⌘⇧3` 截屏闪光），用 240 fps 手机慢动作录像，数帧数。

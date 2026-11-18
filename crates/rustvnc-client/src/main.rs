@@ -22,6 +22,39 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use vnc::{ClientKeyEvent, ClientMouseEvent, Rect, X11Event};
 
+/// Command-line driven start-up behaviour, used by the soak and benchmark
+/// scripts (`scripts/bench-soak.ps1`) so they can run unattended.
+#[derive(Default, Clone, Debug)]
+struct StartupOptions {
+    /// Profile name (or host) to connect to once the UI exists.
+    connect: Option<String>,
+    /// Measure local frame cadence for this many seconds, then exit.
+    bench_seconds: Option<f64>,
+    /// Where to write the frame-cadence summary.
+    bench_out: Option<std::path::PathBuf>,
+}
+
+fn startup_options() -> StartupOptions {
+    let mut options = StartupOptions::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--connect" => options.connect = args.next(),
+            "--bench-frames" => options.bench_seconds = args.next().and_then(|v| v.parse().ok()),
+            "--bench-out" => options.bench_out = args.next().map(std::path::PathBuf::from),
+            _ => {}
+        }
+    }
+    options
+}
+
+/// Local presentation statistics: how often the UI actually manages to present.
+struct FrameBench {
+    started: Instant,
+    until: Instant,
+    intervals_ms: Vec<f64>,
+    out: Option<std::path::PathBuf>,
+}
 /// How the UI should be rendered, in preference order.
 ///
 /// Windows gets a native D3D12 attempt first: it is the API the DWM compositor
@@ -87,10 +120,11 @@ fn main() -> eframe::Result {
     }
 
     let _log_guard = rustvnc_client::diag::init_tracing();
+    let startup = startup_options();
 
     let mut last_error = Ok(());
     for attempt in render_attempts() {
-        match run_native(attempt) {
+        match run_native(attempt, startup.clone()) {
             Ok(()) => return Ok(()),
             Err(err) => {
                 tracing::warn!("renderer {attempt:?} unavailable: {err}");
@@ -101,7 +135,7 @@ fn main() -> eframe::Result {
     last_error
 }
 
-fn run_native(attempt: RenderAttempt) -> eframe::Result {
+fn run_native(attempt: RenderAttempt, startup: StartupOptions) -> eframe::Result {
     let renderer = match attempt {
         RenderAttempt::Wgpu { .. } => eframe::Renderer::Wgpu,
         RenderAttempt::Glow => eframe::Renderer::Glow,
@@ -120,7 +154,7 @@ fn run_native(attempt: RenderAttempt) -> eframe::Result {
     eframe::run_native(
         "RustVNC",
         options,
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, startup)))),
     )
 }
 
@@ -167,6 +201,10 @@ struct App {
     /// client can send real transitions instead of re-deriving them per key,
     /// which is what makes Ctrl+click and Shift+drag work.
     sent_modifiers: ModifierState,
+    /// `--connect`: profile to select and connect to on the first frame.
+    pending_connect: Option<String>,
+    /// `--bench-frames`: local presentation measurement.
+    bench: Option<FrameBench>,
     /// The remote pointer shape, when the server sends one.
     remote_cursor: Option<RemoteCursor>,
     /// A `FramebufferUpdate` has been fully decoded and is ready to present.
@@ -305,7 +343,7 @@ struct ModifierKey {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, startup: StartupOptions) -> Self {
         rustvnc_client::fonts::install_cjk_font(&cc.egui_ctx);
         let path = ProfileStore::default_path();
         let (profiles, error) = match ProfileStore::load(&path) {
@@ -352,6 +390,16 @@ impl App {
             last_remote_clipboard: None,
             last_clipboard_poll: Instant::now(),
             sent_modifiers: ModifierState::default(),
+            pending_connect: startup.connect.clone(),
+            bench: startup.bench_seconds.map(|seconds| {
+                let now = Instant::now();
+                FrameBench {
+                    started: now,
+                    until: now + Duration::from_secs_f64(seconds),
+                    intervals_ms: Vec::new(),
+                    out: startup.bench_out.clone(),
+                }
+            }),
             remote_cursor: None,
             frame_complete: false,
             first_pending: None,
@@ -2164,8 +2212,107 @@ impl App {
     }
 }
 
+impl App {
+    /// `--connect <name>`: select the profile and start the session once the UI
+    /// exists, so a soak run needs no mouse.
+    fn run_pending_connect(&mut self) {
+        let Some(wanted) = self.pending_connect.take() else {
+            return;
+        };
+        let lowered = wanted.to_lowercase();
+        let found = self
+            .profiles
+            .profiles()
+            .iter()
+            .find(|profile| profile.name.eq_ignore_ascii_case(&wanted))
+            .or_else(|| {
+                self.profiles
+                    .profiles()
+                    .iter()
+                    .find(|profile| profile.name.to_lowercase().contains(&lowered))
+            })
+            .or_else(|| {
+                self.profiles
+                    .profiles()
+                    .iter()
+                    .find(|profile| profile.config.host == wanted)
+            })
+            .map(|profile| profile.id.clone());
+        match found {
+            Some(id) => {
+                self.select_profile(&id);
+                self.connect();
+                tracing::info!("--connect: started session for profile {id}");
+            }
+            None => {
+                self.error = Some(format!("--connect: 找不到配置 “{wanted}”"));
+                tracing::warn!("--connect: no profile matched {wanted}");
+            }
+        }
+    }
+
+    /// `--bench-frames <seconds>`: record the interval between presented frames
+    /// and write a summary, then exit. This is the "does the UI keep up" number:
+    /// on a 60 Hz display a healthy run clusters at ~16.7 ms.
+    fn run_frame_bench(&mut self, ctx: &egui::Context) {
+        let Some(bench) = self.bench.as_mut() else {
+            return;
+        };
+        // `unstable_dt` is the wall-clock gap between the previous and this
+        // frame, which is what the user perceives as smoothness.
+        let interval_ms = f64::from(ctx.input(|input| input.unstable_dt)) * 1000.0;
+        // The first frames include window creation and GPU init; they are not
+        // what "smoothness" means, so skip the warm-up second.
+        if interval_ms > 0.0 && bench.started.elapsed() >= Duration::from_secs(1) {
+            bench.intervals_ms.push(interval_ms);
+        }
+        if Instant::now() < bench.until {
+            ctx.request_repaint();
+            return;
+        }
+
+        let mut sorted = bench.intervals_ms.clone();
+        sorted.sort_by(f64::total_cmp);
+        let count = sorted.len();
+        let percentile = |p: f64| -> f64 {
+            if count == 0 {
+                return 0.0;
+            }
+            let index = (((count as f64) * p / 100.0) as usize).min(count - 1);
+            sorted[index]
+        };
+        let mean = if count == 0 {
+            0.0
+        } else {
+            sorted.iter().sum::<f64>() / count as f64
+        };
+        let fps = if mean > 0.0 { 1000.0 / mean } else { 0.0 };
+        let summary = format!(
+            "frames={count} mean={mean:.2}ms p50={:.2}ms p95={:.2}ms p99={:.2}ms max={:.2}ms fps={fps:.1}",
+            percentile(50.0),
+            percentile(95.0),
+            percentile(99.0),
+            sorted.last().copied().unwrap_or(0.0)
+        );
+        println!("bench-frames: {summary}");
+        tracing::info!("bench-frames: {summary}");
+        if let Some(path) = &bench.out {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, format!("{summary}\n"));
+        }
+        self.bench = None;
+        // Closing the window normally hides to the tray, which would leave a
+        // benchmark run hanging; a benchmark run must terminate on its own.
+        std::process::exit(0);
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.run_pending_connect();
+        self.run_frame_bench(ctx);
         self.handle_tray(ctx);
         self.poll_update(ctx);
         if self.start_minimized && self._tray.is_some() {
@@ -2300,7 +2447,14 @@ impl eframe::App for App {
         }
         self.handle_input(ctx);
         self.sync_clipboard();
-        ctx.request_repaint_after(Duration::from_millis(16));
+        // A live session needs a 60 Hz tick to present frames; an idle window
+        // does not, and repainting it at 60 Hz cost ~11 % of a core in the soak
+        // run for no visible benefit.
+        if self.session.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
     }
 }
 

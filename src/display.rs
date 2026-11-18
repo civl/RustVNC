@@ -19,6 +19,12 @@ use core_graphics::display::{
 };
 use foreign_types_shared::ForeignType;
 
+unsafe extern "C" {
+    /// Available since macOS 10.15; reports whether this process may capture the
+    /// screen. Display enumeration depends on it on recent releases.
+    fn CGPreflightScreenCaptureAccess() -> bool;
+}
+
 const ORIGINAL_FILE: &str = "display-original.txt";
 const APPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -61,6 +67,11 @@ impl DisplayGuard {
     }
 
     pub fn apply(&self, width: u16, height: u16) -> Result<AppliedMode> {
+        if !screen_recording_ok() {
+            bail!(
+                "macOS 未授予“屏幕录制”权限，无法切换分辨率：请在 系统设置 → 隐私与安全性 → 屏幕录制 中勾选 RustVNC Agent"
+            );
+        }
         let (reply, response) = mpsc::channel();
         self.commands
             .send(Command::Apply {
@@ -334,8 +345,16 @@ impl MirrorGuard {
     /// `single = true` mirrors everything onto the main display; `false` unmirrors
     /// every display that is currently mirroring.
     pub fn apply(single: bool) -> Result<Self> {
+        if !screen_recording_ok() {
+            bail!(
+                "macOS 未授予“屏幕录制”权限，无法枚举显示器：请在 系统设置 → 隐私与安全性 → 屏幕录制 中勾选 RustVNC Agent"
+            );
+        }
         let ids = CGDisplay::active_displays()
             .map_err(|err| anyhow::anyhow!("enumerate displays: {err:?}"))?;
+        if ids.is_empty() {
+            bail!("未枚举到任何显示器（屏幕录制权限或显示服务未就绪）");
+        }
         let previous: Vec<(CGDirectDisplayID, CGDirectDisplayID)> = ids
             .iter()
             .map(|id| (*id, CGDisplay::new(*id).mirrors_display()))
@@ -405,8 +424,23 @@ impl Drop for MirrorGuard {
 /// Written to a file as well as stdout because a menu-bar/GUI launch has no
 /// usable stdout: this is how a remote session can see what CoreGraphics
 /// actually reports while the agent runs inside the login session.
+/// Whether this process may enumerate/configure displays.
+///
+/// macOS gates `CGGetActiveDisplayList` behind Screen Recording on recent
+/// releases: without the grant it reports zero displays, so every layout change
+/// silently does nothing. Callers must turn that into a visible error instead of
+/// reporting success.
+fn screen_recording_ok() -> bool {
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
 pub fn diagnose() -> String {
     let mut out = String::new();
+    // macOS gates display enumeration behind Screen Recording on recent
+    // releases; without it `CGGetActiveDisplayList` reports zero displays and
+    // every layout change is a silent no-op.
+    let screen_access = unsafe { CGPreflightScreenCaptureAccess() };
+    out.push_str(&format!("screen recording permission: {screen_access}\n"));
     out.push_str(&format!("main display id: {}\n", CGDisplay::main().id));
     match CGDisplay::active_displays() {
         Ok(ids) => {

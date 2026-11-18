@@ -1001,11 +1001,7 @@ impl App {
         // macOS account password for headless runs (soak, benchmarks, CI) so the
         // secret need not sit in the credential store. It is used for this
         // session only and never written back.
-        let password = match std::env::var("MACOS_PASSWORD")
-            .or_else(|_| std::env::var("RUSTVNC_PASSWORD"))
-            .ok()
-            .filter(|value| !value.is_empty())
-        {
+        let password = match env_password() {
             Some(from_env) => {
                 tracing::info!("using the password from the environment");
                 from_env
@@ -1654,12 +1650,27 @@ impl App {
 
                 ui.label(lang.t("密码", "Password"));
                 ui.horizontal(|ui| {
+                    let from_env = env_password().is_some();
                     ui.add(
                         egui::TextEdit::singleline(&mut self.password)
                             .password(true)
+                            .hint_text(if from_env {
+                                lang.t("已由环境变量提供，可留空", "provided by env, may stay empty")
+                            } else {
+                                lang.t("输入 macOS 账号密码", "macOS account password")
+                            })
                             .desired_width(240.0),
                     );
                     ui.checkbox(&mut self.remember, lang.t("记住", "Remember"));
+                    if from_env {
+                        // Testing/automation path: no typing needed, and saying so
+                        // avoids the "the app will not take my password" confusion.
+                        ui.label(
+                            egui::RichText::new(lang.t("使用 MACOS_PASSWORD", "using MACOS_PASSWORD"))
+                                .small()
+                                .color(egui::Color32::from_rgb(0x2e, 0x8b, 0x57)),
+                        );
+                    }
                 });
                 ui.end_row();
 
@@ -2558,10 +2569,30 @@ impl eframe::App for App {
                             ui.separator();
                             ui.colored_label(
                                 egui::Color32::from_rgb(214, 162, 40),
-                                self.lang.t(
-                                    "远端分辨率较高：把 Mac 的显示器设为 1920×1080 可显著降低带宽",
-                                    "High remote resolution: set the Mac's display to 1920×1080 to cut bandwidth",
-                                ),
+                                match self.auto_preset {
+                                    // The auto target is known but cannot be
+                                    // applied without the Agent; say so instead of
+                                    // asking the user to do it by hand.
+                                    Some(preset) if self.agent.is_none()
+                                        && preset.dimensions().is_some() =>
+                                    {
+                                        let (width, height) = preset.dimensions().unwrap_or_default();
+                                        format!(
+                                            "{} {width}×{height}",
+                                            self.lang.t(
+                                                "远端分辨率较高：自动目标尚未应用（需要 Agent 通道）",
+                                                "High remote resolution: auto target not applied (needs the Agent channel)"
+                                            )
+                                        )
+                                    }
+                                    _ => self
+                                        .lang
+                                        .t(
+                                            "远端分辨率较高：把 Mac 的显示器设为 1920×1080 可显著降低带宽",
+                                            "High remote resolution: set the Mac's display to 1920×1080 to cut bandwidth",
+                                        )
+                                        .to_string(),
+                                },
                             );
                         }
                     }
@@ -2611,6 +2642,15 @@ impl eframe::App for App {
         };
         ctx.request_repaint_after(tick);
     }
+}
+
+/// Password supplied by the environment, for automated runs (`MACOS_PASSWORD`
+/// per this project's convention, `RUSTVNC_PASSWORD` accepted as an alias).
+fn env_password() -> Option<String> {
+    std::env::var("MACOS_PASSWORD")
+        .or_else(|_| std::env::var("RUSTVNC_PASSWORD"))
+        .ok()
+        .filter(|value| !value.is_empty())
 }
 
 /// Frame rate below which the Auto resolution ladder steps the Mac display down.

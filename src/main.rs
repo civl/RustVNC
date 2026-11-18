@@ -329,6 +329,13 @@ fn start_server(ui: &mut ServerUi) {
 
     let (events_tx, events_rx) = std::sync::mpsc::channel();
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    // A previous session may have been killed before its guard could restore
+    // the display: fix that before serving again.
+    match rustvnc_agent::display::restore_saved(&paths::agent_dir()) {
+        Ok(true) => println!("restored a display mode left over from a previous session"),
+        Ok(false) => {}
+        Err(err) => eprintln!("could not restore the previous display mode: {err:#}"),
+    }
     let options = ServeOptions {
         listen: listen_addr(),
         state_dir: paths::agent_dir(),

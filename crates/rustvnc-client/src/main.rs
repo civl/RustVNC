@@ -230,6 +230,12 @@ struct App {
     client_screen: Option<(u32, u32)>,
     /// The rung of the resolution ladder currently in use for Auto.
     auto_preset: Option<ResolutionPreset>,
+    /// The Auto target itself: the ladder must never go below what the client
+    /// screen can display, or a transient slow second would leave the user on a
+    /// blurrier screen than they asked for.
+    auto_floor: Option<ResolutionPreset>,
+    /// When the current session was started (ladder warm-up).
+    session_started: Instant,
     /// Consecutive stats samples below the frame-rate floor.
     low_fps_streak: u8,
     /// Latest measured frame rate, for the resolution ladder.
@@ -387,6 +393,16 @@ impl App {
         let Some(current) = self.auto_preset else {
             return;
         };
+        // The first seconds of a session are dominated by the full-frame decode,
+        // and an idle screen is supposed to run slowly: neither is evidence that
+        // the link is too slow for the chosen size.
+        if self.session_idle || self.session_started.elapsed() < LADDER_WARMUP {
+            return;
+        }
+        // Never drop below the size the client screen itself can show.
+        if self.auto_floor.is_some_and(|floor| current == floor) {
+            return;
+        }
         if fps <= 0.0 {
             // No frames yet (still connecting); not a signal.
             return;
@@ -470,6 +486,8 @@ impl App {
             sent_modifiers: ModifierState::default(),
             client_screen: None,
             auto_preset: None,
+            auto_floor: None,
+            session_started: Instant::now(),
             low_fps_streak: 0,
             session_fps: 0.0,
             first_frame_logged: false,
@@ -1022,6 +1040,10 @@ impl App {
             .config
             .resolution
             .target_for_client(self.client_screen.unwrap_or((1920, 1080)));
+        self.auto_floor = self.auto_preset;
+        self.session_started = Instant::now();
+        self.low_fps_streak = 0;
+        self.session_idle = false;
         self.pending_resolution = self.auto_preset.and_then(|preset| preset.dimensions());
         if self.draft.config.resolution == ResolutionPreset::Auto {
             match self.pending_resolution {
@@ -2688,6 +2710,9 @@ fn env_password() -> Option<String> {
 
 /// Frame rate below which the Auto resolution ladder steps the Mac display down.
 const FPS_FLOOR: f64 = 30.0;
+/// Ignore the first seconds of a session: the initial full-frame decode always
+/// looks like a slow link.
+const LADDER_WARMUP: Duration = Duration::from_secs(8);
 /// Consecutive one-second samples under `FPS_FLOOR` before stepping down, so a
 /// single slow second (a big scroll, a window animation) is not punished.
 const LOW_FPS_SAMPLES: u8 = 3;

@@ -426,6 +426,13 @@ async fn handle_connection(
 
             loop {
                 tokio::select! {
+                    // A client that crashes or is killed never sends Goodbye; the
+                    // QUIC connection closing is what tells us to put the Mac's
+                    // display back the way it was.
+                    _ = connection.closed() => {
+                        info!("client connection closed; restoring display state");
+                        break;
+                    }
                     message = msg_rx.recv() => {
                         match message {
                             Some(ControlMsg::Ping { nonce }) => {

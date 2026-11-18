@@ -802,10 +802,12 @@ impl SessionFailure {
                 height,
                 pixels,
                 max_pixels,
+                max_dimension,
             } => Self::new(
                 SessionErrorCode::Protocol,
                 format!(
-                    "远端分辨率 {width}×{height}（{pixels} 像素）超过客户端上限 {max_pixels} 像素；\
+                    "远端分辨率 {width}×{height}（{pixels} 像素）超过客户端上限 \
+                     （{max_pixels} 像素 / 单边 {max_dimension}）；\
                      请在 Mac 上把「显示器 → 分辨率」调低（或使用缩放分辨率）后重连"
                 ),
                 false,

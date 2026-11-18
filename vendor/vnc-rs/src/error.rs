@@ -28,13 +28,14 @@ pub enum VncError {
     #[error("Image data cannot be decoded correctly")]
     InvalidImageData,
     #[error(
-        "framebuffer {width}x{height} ({pixels} pixels) exceeds this client's {max_pixels}-pixel limit"
+        "framebuffer {width}x{height} ({pixels} pixels) exceeds this client's limit ({max_pixels} pixels / {max_dimension} px per side)"
     )]
     FramebufferTooLarge {
         width: u16,
         height: u16,
         pixels: u64,
         max_pixels: u64,
+        max_dimension: u16,
     },
     #[error("The server used an encoding this client does not implement ({0})")]
     UnsupportedEncoding(i32),

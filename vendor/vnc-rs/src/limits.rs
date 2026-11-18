@@ -10,7 +10,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 /// case 32 bpp frame is ~141 MB, and only when a server actually sends a
 /// rectangle that large.
 pub(crate) const MAX_PIXELS: usize = 8192 * 4320;
-pub(crate) const MAX_DIMENSION: u16 = 8192;
+pub(crate) const MAX_DIMENSION: u16 = 16384;
 pub(crate) const MAX_COMPRESSED: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_TEXT: usize = 1024 * 1024;
 /// Apple pseudo-encoding bodies are tiny metadata blobs; anything larger is a
@@ -33,6 +33,7 @@ pub(crate) fn dimensions(width: u16, height: u16) -> Result<(), VncError> {
             height,
             pixels,
             max_pixels: MAX_PIXELS as u64,
+            max_dimension: MAX_DIMENSION,
         });
     }
     Ok(())
@@ -72,6 +73,7 @@ mod tests {
         // "image data cannot be decoded correctly".
         dimensions(5120, 2880).expect("5K must be accepted");
         dimensions(6016, 3384).expect("6K must be accepted");
+        dimensions(8960, 2880).expect("virtual + physical side-by-side must be accepted");
         dimensions(3840, 2160).expect("4K must be accepted");
         dimensions(1, 1).expect("tiny framebuffers are fine");
     }
@@ -80,10 +82,14 @@ mod tests {
     fn rejects_oversized_with_a_distinct_error() {
         match dimensions(8192, 8192) {
             Err(VncError::FramebufferTooLarge {
-                pixels, max_pixels, ..
+                pixels,
+                max_pixels,
+                max_dimension,
+                ..
             }) => {
                 assert_eq!(pixels, 8192 * 8192);
                 assert_eq!(max_pixels, MAX_PIXELS as u64);
+                assert_eq!(max_dimension, MAX_DIMENSION);
             }
             other => panic!("expected FramebufferTooLarge, got {other:?}"),
         }

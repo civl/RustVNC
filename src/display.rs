@@ -23,6 +23,9 @@ unsafe extern "C" {
     /// Available since macOS 10.15; reports whether this process may capture the
     /// screen. Display enumeration depends on it on recent releases.
     fn CGPreflightScreenCaptureAccess() -> bool;
+    /// Shows the system prompt that asks the user to grant Screen Recording,
+    /// which also registers this app in the Privacy pane.
+    fn CGRequestScreenCaptureAccess() -> bool;
 }
 
 const ORIGINAL_FILE: &str = "display-original.txt";
@@ -67,11 +70,8 @@ impl DisplayGuard {
     }
 
     pub fn apply(&self, width: u16, height: u16) -> Result<AppliedMode> {
-        if !screen_recording_ok() {
-            bail!(
-                "macOS 未授予“屏幕录制”权限，无法切换分辨率：请在 系统设置 → 隐私与安全性 → 屏幕录制 中勾选 RustVNC Agent"
-            );
-        }
+        // No Screen Recording check here on purpose: mode enumeration and
+        // switching work without it (verified), unlike `CGGetActiveDisplayList`.
         let (reply, response) = mpsc::channel();
         self.commands
             .send(Command::Apply {
@@ -432,6 +432,15 @@ impl Drop for MirrorGuard {
 /// reporting success.
 fn screen_recording_ok() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+/// Ask macOS to show the Screen Recording prompt for this app.
+///
+/// Only meaningful when the process is the app bundle the user will grant
+/// (`/Applications/RustVNC Agent.app`); a binary started from an SSH shell is
+/// attributed to sshd and cannot be granted.
+pub fn request_screen_recording() -> bool {
+    unsafe { CGRequestScreenCaptureAccess() }
 }
 
 pub fn diagnose() -> String {

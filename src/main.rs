@@ -44,6 +44,12 @@ fn real_main() -> anyhow::Result<()> {
             let options = parse_serve_options(&args[1..])?;
             return run_serve(options);
         }
+        Some("--request-screen-permission") => {
+            let granted = rustvnc_agent::display::request_screen_recording();
+            println!("screen recording prompt shown; granted={granted}");
+            print!("{}", rustvnc_agent::display::diagnose());
+            return Ok(());
+        }
         Some("--diagnose-displays") => {
             let text = rustvnc_agent::display::diagnose();
             print!("{text}");

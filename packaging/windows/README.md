@@ -6,14 +6,20 @@
 
 ```powershell
 winget install JRSoftware.InnoSetup
+choco install wixtoolset -y
 powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1
+powershell -ExecutionPolicy Bypass -File packaging/windows/build-msi.ps1
 ```
 
 输出：
 
 ```text
 packaging/windows/output/RustVNC-Setup-0.1.0.exe
+packaging/windows/output/RustVNC.msi
 ```
+
+MSI 是 per-user WiX 工程（`Product.wxs`），安装到
+`%LOCALAPPDATA%\Programs\RustVNC`，不要求管理员权限。
 
 安装目录：`%LOCALAPPDATA%\Programs\RustVNC`。
 

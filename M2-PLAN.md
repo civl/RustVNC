@@ -16,7 +16,7 @@
 | M2a | 渲染 / DPI / 多显示器 / 比例切换 | 部分完成：D3D12/Vulkan/GL/glow 回退；全屏；Fit/1:1/50/100/200 + 滚动；多显示器仍为合并 framebuffer | 本轮完成比例/DPI |
 | M2b | 自适应控制器：快/慢环、滞回、手动锁定、HUD | ✅ 本轮已实现：延迟 EMA、双阈值、HUD、开关 | 完成 |
 | M2c | 多标签 / 托盘 / 通知 / 开机自启 | ✅ 多标签、托盘、开机自启已实现；通知待做 | 完成（通知除外） |
-| M2d | MSI/Authenticode/自动更新/回滚 | 自动更新/校验/回滚已实现；Inno 安装包 CI 已有；MSI 与真实证书签名待补 | 进行中 |
+| M2d | MSI/Authenticode/自动更新/回滚 | 自动更新/校验/回滚 + Inno + WiX MSI CI；真实证书签名待补 | 基本完成 |
 | M2e | 性能/内存/CPU/8 小时 soak | 未开始 | 后续 |
 
 ## M2b：自适应控制器（本轮）
@@ -71,7 +71,6 @@
 
 未完成：
 
-- WiX MSI 工程与 CI 产物（当前只有 Inno Setup）。
 - 真实证书的 Authenticode、SmartScreen/EV 验证。
 - 更新服务器/Release 资产与自动检查策略。
 

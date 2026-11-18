@@ -78,8 +78,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
+      - name: Install Inno Setup and WiX
+        run: |
+          choco install innosetup -y --no-progress
+          choco install wixtoolset -y --no-progress
       - name: Materialise signing certificate
         # Optional: without the secret the installer is built unsigned and
         # `sign.ps1` says so instead of failing the build.
@@ -91,12 +93,16 @@ jobs:
           "RUSTVNC_SIGN_CERT=$path" | Out-File -FilePath $env:GITHUB_ENV -Append
           "RUSTVNC_SIGN_PASSWORD=$env:WINDOWS_SIGN_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Append
           "RUSTVNC_REQUIRE_SIGN=1" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Build installer
-        run: powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1
+      - name: Build installers
+        run: |
+          powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1
+          powershell -ExecutionPolicy Bypass -File packaging/windows/build-msi.ps1
       - uses: actions/upload-artifact@v7
         with:
           name: rustvnc-windows-installer
-          path: packaging/windows/output/*.exe
+          path: |
+            packaging/windows/output/*.exe
+            packaging/windows/output/*.msi
           if-no-files-found: error
 
   windows-client:

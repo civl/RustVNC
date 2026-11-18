@@ -27,15 +27,30 @@ read -rs VNC_PASSWORD
 printf '\n'
 export VNC_PASSWORD
 
+# The probe runs in the background so we can move the remote pointer and
+# change the display mode while it is connected. macOS only emits 1104 on
+# pointer motion and 1105 on a display-geometry change.
 cargo run --quiet -p rfb-probe -- \
   --host "$HOST" \
   --port "$PORT" \
   --user "$USER_NAME" \
   --apple \
+  --wiggle \
   --seconds "$SECONDS_TO_RUN" \
   --save target/apple-capture/last-frame.png \
-  2>&1 | tee "$OUT"
+  >"$OUT" 2>&1 &
+probe_pid=$!
+
+sleep 3
+if [ "${RUSTVNC_CAPTURE_DISPLAY_SWITCH:-1}" = "1" ]; then
+  cargo run --quiet -p rustvnc-agent --bin display-switch -- 1920 1080 \
+    >target/apple-capture/display-switch.log 2>&1 || \
+    echo "warning: display-switch failed; see target/apple-capture/display-switch.log"
+fi
+
+wait "$probe_pid"
 unset VNC_PASSWORD
+cat "$OUT"
 
 echo
 echo "capture: $OUT"

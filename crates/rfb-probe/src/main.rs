@@ -54,6 +54,10 @@ struct Cli {
     /// Send a pointer move/click and an "A" key once (types into the focused app!)
     #[arg(long)]
     input_test: bool,
+    /// Move the remote pointer in a small square for the first 3 seconds.
+    /// This makes macOS emit Apple 1104 cursor updates without clicking.
+    #[arg(long)]
+    wiggle: bool,
     /// Print RFB version and security types, then exit
     #[arg(long)]
     inspect: bool,
@@ -185,6 +189,8 @@ async fn run(cli: Cli) -> Result<()> {
     let mut rects = 0u64;
     let mut bytes = 0u64;
     let mut input_sent = false;
+    let mut next_wiggle = Instant::now();
+    let mut wiggle_index = 0i32;
     let start = Instant::now();
     let deadline = start + Duration::from_secs(cli.seconds);
     let mut last_refresh = Instant::now() - Duration::from_millis(50);
@@ -220,6 +226,24 @@ async fn run(cli: Cli) -> Result<()> {
             send_input_test(&client, &framebuffer).await?;
             input_sent = true;
             println!("input_test_sent");
+        }
+
+        if cli.wiggle && start.elapsed() < Duration::from_secs(3) && next_wiggle <= Instant::now() {
+            let width = framebuffer.width.max(200) as u16;
+            let height = framebuffer.height.max(200) as u16;
+            let offsets = [(0i32, 0i32), (80, 0), (80, 80), (0, 80)];
+            let (dx, dy) = offsets[(wiggle_index as usize) % offsets.len()];
+            wiggle_index = wiggle_index.wrapping_add(1);
+            let x = (width / 2) as i32 + dx;
+            let y = (height / 2) as i32 + dy;
+            client
+                .input(X11Event::PointerEvent(ClientMouseEvent {
+                    position_x: x.clamp(0, width as i32 - 1) as u16,
+                    position_y: y.clamp(0, height as i32 - 1) as u16,
+                    bottons: 0,
+                }))
+                .await?;
+            next_wiggle = Instant::now() + Duration::from_millis(120);
         }
 
         if last_refresh.elapsed() >= Duration::from_millis(33) {

@@ -35,14 +35,12 @@
                     Directory="ApplicationProgramsFolder"
                     Name="RustVNC"
                     Description="RustVNC remote desktop"
-                    WorkingDirectory="INSTALLFOLDER"
-                    Advertise="yes" />
+                    WorkingDirectory="INSTALLFOLDER" />
           <Shortcut Id="DesktopShortcut"
                     Directory="DesktopFolder"
                     Name="RustVNC"
                     Description="RustVNC remote desktop"
-                    WorkingDirectory="INSTALLFOLDER"
-                    Advertise="yes" />
+                    WorkingDirectory="INSTALLFOLDER" />
         </File>
         <RegistryValue Root="HKCU"
                        Key="Software\RustVNC"

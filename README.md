@@ -28,7 +28,7 @@ Windows 客户端 ── RFB/SSH (5900) ──────────► macOS 
 | **会话** | 多标签（后台标签暂停请求、切回 `FullRefresh`）、自动重连（指数退避）、连接/握手超时 |
 | **系统** | 托盘常驻（关窗隐藏）、开机自启（`--minimized` 静默启动）、凭据存 Credential Manager、诊断日志与诊断包 |
 | **安装** | Inno Setup 安装包 + WiX per-user MSI；Authenticode 签名脚本；manifest 更新（SHA-256 校验 + 回滚） |
-| **Agent** | 8 位配对码（300 秒一次性，带尝试次数与按 IP 限流）、mTLS 证书固定、剪贴板、Opus 48 kHz 立体声、远端分辨率切换 |
+| **Agent** | 8 位配对码（300 秒一次性，带尝试次数与按 IP 限流）、mTLS 证书固定、剪贴板、Opus 48 kHz 立体声、**自动降分辨率**（按客户端屏幕选目标，帧率 <30 时逐级下退） |
 
 ## 进度
 
@@ -131,6 +131,16 @@ packaging/windows/          # Inno Setup、WiX MSI、签名与更新 manifest �
 - [M0 兼容性报告](M0-COMPATIBILITY.md) · [M1 客户端状态](M1-STATUS.md) · [**M2 执行计划**](M2-PLAN.md)
 - [卡点分析与修复计划](BLOCKER-ANALYSIS.md) · [真机验收清单](ACCEPTANCE.md)
 - Agent 侧分册：[A0 骨架](README-A0.md) · [A1 控制面](README-A1.md) · [A2 菜单栏与剪贴板](README-A2.md) · [A2b 音频](README-A2B.md)
+
+## 自动化环境变量
+
+无头或脚本化运行（soak、基准、验收）不必手工输入凭据：
+
+| 变量 | 用途 |
+|---|---|
+| `MACOS_USERNAME` | macOS 账号；缺省时取已保存配置里的账号 |
+| `MACOS_PASSWORD` | macOS 账号密码；设置了就用于本次会话，且**不写入凭据库**（测试/自动化专用） |
+| `RUSTVNC_RENDERER` | 强制渲染后端：`dx12` / `vulkan` / `gl` / `glow` |
 
 ## 已知限制
 

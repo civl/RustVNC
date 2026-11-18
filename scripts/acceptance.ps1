@@ -69,14 +69,41 @@ if (-not $SkipBuild) {
     Invoke-Step "release build: client" "cargo build --release -p rustvnc-client"
 }
 
-if ($env:RUSTVNC_MAC_HOST) {
+# 真机相关的环境变量：主机名来自 RUSTVNC_MAC_HOST，凭据来自用户级 MACOS_USERNAME /
+# MACOS_PASSWORD（本项目约定）。凭据只在本进程内传递给探针，不落盘、不打印。
+$macHost = $env:RUSTVNC_MAC_HOST
+if (-not $macHost) { $macHost = [Environment]::GetEnvironmentVariable('MACOS_HOST','User') }
+$macUser = $env:MACOS_USERNAME
+if (-not $macUser) { $macUser = [Environment]::GetEnvironmentVariable('MACOS_USERNAME','User') }
+if (-not $macUser) {
+    # 没设用户名时用已保存配置里的账号，免得再要一份重复的凭据。
+    $profilePath = Join-Path $env:APPDATA 'RustVNC\client\profiles.json'
+    if (Test-Path $profilePath) {
+        $saved = (Get-Content $profilePath -Raw | ConvertFrom-Json).profiles | Select-Object -First 1
+        if ($saved) { $macUser = $saved.config.user }
+    }
+}
+$macPassword = [Environment]::GetEnvironmentVariable('MACOS_PASSWORD','User')
+
+if ($macHost) {
     $port = if ($env:RUSTVNC_MAC_PORT) { $env:RUSTVNC_MAC_PORT } else { "5900" }
     # Read-only: version string + offered security types, no credentials.
-    Invoke-Step "probe real Mac ($($env:RUSTVNC_MAC_HOST):$port)" `
-        "cargo run --quiet -p rfb-probe -- --inspect --host $($env:RUSTVNC_MAC_HOST) --port $port"
+    Invoke-Step "probe real Mac ($($macHost):$port)" `
+        "cargo run --quiet -p rfb-probe -- --inspect --host $macHost --port $port"
+    if ($macUser -and $macPassword) {
+        # 认证后跑 5 秒，验证账号密码确实可用（凭据经环境变量传给探针）。
+        $env:VNC_USERNAME = $macUser
+        $env:VNC_PASSWORD = $macPassword
+        Invoke-Step "probe auth + 5s stream ($($macHost):$port)" `
+            "cargo run --quiet -p rfb-probe -- --host $macHost --port $port --auth ard --user $macUser --seconds 5"
+        Remove-Item Env:\VNC_PASSWORD -ErrorAction SilentlyContinue
+        Remove-Item Env:\VNC_USERNAME -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "提示：未设置 MACOS_USERNAME / MACOS_PASSWORD，跳过登录态探针。" -ForegroundColor Yellow
+    }
 } else {
     Write-Host ""
-    Write-Host "跳过真机探针（未设置 RUSTVNC_MAC_HOST）" -ForegroundColor Yellow
+    Write-Host "跳过真机探针（未设置 RUSTVNC_MAC_HOST 或用户级 MACOS_HOST）" -ForegroundColor Yellow
 }
 
 Write-Host ""

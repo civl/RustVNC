@@ -101,10 +101,32 @@ fn wgpu_configuration(backends: wgpu::Backends) -> eframe::egui_wgpu::WgpuConfig
         // Vulkan before D3D12 — which is how a Vulkan adapter ended up driving a
         // desktop that D3D12 handles better.
         setup.instance_descriptor.backends = backends;
+        // egui-wgpu hardcodes `max_texture_dimension_2d: 8192`. A Mac driving a
+        // 8960-pixel-wide display (BetterDisplay, ultrawide, or a scaled virtual
+        // screen) then fails at `create_texture` with a wgpu validation error and
+        // the process aborts on the first frame. Ask the adapter what it can
+        // actually do and keep everything else egui-wgpu chose (notably the
+        // downlevel limits it uses for the GL backend).
+        let egui_descriptor = setup.device_descriptor.clone();
+        setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+            let mut descriptor = egui_descriptor(adapter);
+            let supported = adapter.limits().max_texture_dimension_2d;
+            descriptor.required_limits.max_texture_dimension_2d = highest_texture_dimension(
+                descriptor.required_limits.max_texture_dimension_2d,
+                supported,
+            );
+            descriptor
+        });
     }
     // A remote desktop wants the shortest possible present queue.
     configuration.desired_maximum_frame_latency = Some(1);
     configuration
+}
+
+/// The larger of what the renderer asked for and what the GPU supports: never
+/// ask for less than needed, never ask for more than exists.
+fn highest_texture_dimension(requested: u32, supported: u32) -> u32 {
+    requested.max(supported)
 }
 
 fn main() -> eframe::Result {
@@ -203,6 +225,21 @@ struct App {
     sent_modifiers: ModifierState,
     /// `--connect`: profile to select and connect to on the first frame.
     pending_connect: Option<String>,
+    /// Physical size of the monitor this window is on, used by the Auto
+    /// resolution preset.
+    client_screen: Option<(u32, u32)>,
+    /// The rung of the resolution ladder currently in use for Auto.
+    auto_preset: Option<ResolutionPreset>,
+    /// Consecutive stats samples below the frame-rate floor.
+    low_fps_streak: u8,
+    /// Latest measured frame rate, for the resolution ladder.
+    session_fps: f64,
+    /// Set once the first frame of a session has been decoded (logged for the
+    /// soak script, which needs proof that pixels actually flow).
+    first_frame_logged: bool,
+    /// True while the session is backed off because the remote screen is static;
+    /// drives the UI tick so a static session does not repaint at 60 Hz.
+    session_idle: bool,
     /// `--bench-frames`: local presentation measurement.
     bench: Option<FrameBench>,
     /// The remote pointer shape, when the server sends one.
@@ -343,6 +380,47 @@ struct ModifierKey {
 }
 
 impl App {
+    /// Auto resolution ladder: if the stream cannot hold `FPS_FLOOR`, ask the Mac
+    /// for a smaller display mode instead of dropping frames. Pixels the client
+    /// cannot show are pure cost on both ends.
+    fn update_resolution_ladder(&mut self, fps: f64) {
+        let Some(current) = self.auto_preset else {
+            return;
+        };
+        if fps <= 0.0 {
+            // No frames yet (still connecting); not a signal.
+            return;
+        }
+        if fps >= FPS_FLOOR {
+            self.low_fps_streak = 0;
+            return;
+        }
+        self.low_fps_streak = self.low_fps_streak.saturating_add(1);
+        if self.low_fps_streak < LOW_FPS_SAMPLES {
+            return;
+        }
+        self.low_fps_streak = 0;
+        let Some(next) = current.step_down() else {
+            return;
+        };
+        let Some((width, height)) = next.dimensions() else {
+            return;
+        };
+        let Some(agent) = &self.agent else {
+            tracing::warn!(
+                "frame rate {fps:.1} fps is below {FPS_FLOOR:.0}; a smaller display mode would help but the Agent channel is not connected"
+            );
+            return;
+        };
+        agent.set_display_mode(width, height);
+        self.auto_preset = Some(next);
+        self.pending_resolution = Some((width, height));
+        tracing::warn!(
+            "frame rate {fps:.1} fps is below {FPS_FLOOR:.0}: stepping the Mac display down to {width}x{height}"
+        );
+        self.agent_status
+            .push_str(&format!(" · 帧率不足，已降到 {width}×{height}"));
+    }
     fn new(cc: &eframe::CreationContext<'_>, startup: StartupOptions) -> Self {
         rustvnc_client::fonts::install_cjk_font(&cc.egui_ctx);
         let path = ProfileStore::default_path();
@@ -390,6 +468,12 @@ impl App {
             last_remote_clipboard: None,
             last_clipboard_poll: Instant::now(),
             sent_modifiers: ModifierState::default(),
+            client_screen: None,
+            auto_preset: None,
+            low_fps_streak: 0,
+            session_fps: 0.0,
+            first_frame_logged: false,
+            session_idle: false,
             pending_connect: startup.connect.clone(),
             bench: startup.bench_seconds.map(|seconds| {
                 let now = Instant::now();
@@ -913,11 +997,54 @@ impl App {
             let _ = self.credentials.delete(&self.draft.id);
         }
 
-        match Session::start(self.draft.config.clone(), self.password.clone()) {
+        // Automation hook: `MACOS_PASSWORD` (or `RUSTVNC_PASSWORD`) supplies the
+        // macOS account password for headless runs (soak, benchmarks, CI) so the
+        // secret need not sit in the credential store. It is used for this
+        // session only and never written back.
+        let password = match std::env::var("MACOS_PASSWORD")
+            .or_else(|_| std::env::var("RUSTVNC_PASSWORD"))
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            Some(from_env) => {
+                tracing::info!("using the password from the environment");
+                from_env
+            }
+            None => self.password.clone(),
+        };
+        if password.is_empty() {
+            // ARD/VNC 都需要密码；空密码只会让握手卡住直到超时。
+            self.error =
+                Some("需要密码：在下方输入并勾选“记住”，或设置环境变量 MACOS_PASSWORD".to_string());
+            self.status = "需要密码".to_string();
+            return;
+        }
+        // Auto resolves against the client screen: never ask the Mac for more
+        // pixels than this display can show.
+        self.auto_preset = self
+            .draft
+            .config
+            .resolution
+            .target_for_client(self.client_screen.unwrap_or((1920, 1080)));
+        self.pending_resolution = self.auto_preset.and_then(|preset| preset.dimensions());
+        if self.draft.config.resolution == ResolutionPreset::Auto {
+            match self.pending_resolution {
+                Some((width, height)) => tracing::info!(
+                    "auto resolution: client screen {:?} -> {width}x{height}",
+                    self.client_screen
+                ),
+                None => tracing::info!(
+                    "auto resolution: client screen {:?} fits no preset, keeping native",
+                    self.client_screen
+                ),
+            }
+        }
+        match Session::start(self.draft.config.clone(), password) {
             Ok(session) => {
                 self.frame = Frame::default();
                 self.texture = None;
                 self.frame_dirty = false;
+                self.first_frame_logged = false;
                 self.pending_rects.clear();
                 self.last_pointer = None;
                 self.image_rect = None;
@@ -943,8 +1070,12 @@ impl App {
     /// `agent_status` and leaves the RFB session untouched — the agent only
     /// adds clipboard and audio.
     fn start_agent(&mut self) {
-        self.pending_resolution = None;
         if !self.draft.config.agent.enabled {
+            if self.pending_resolution.is_some() {
+                tracing::warn!(
+                    "resolution control needs the Agent channel; keeping the Mac display as is"
+                );
+            }
             return;
         }
         let addr = format!(
@@ -959,7 +1090,7 @@ impl App {
         }) {
             Ok(session) => {
                 self.agent_status = "连接 Agent…".to_string();
-                if let Some((width, height)) = self.draft.config.resolution.dimensions() {
+                if let Some((width, height)) = self.pending_resolution {
                     session.set_display_mode(width, height);
                     self.agent_status = format!("连接 Agent…（请求分辨率 {width}×{height}）");
                 }
@@ -1203,6 +1334,10 @@ impl App {
                     self.remote_cursor = RemoteCursor::new(ctx, hotspot, size, &rgba);
                 }
                 SessionEvent::FrameComplete => {
+                    if !self.first_frame_logged && self.frame_dirty {
+                        self.first_frame_logged = true;
+                        tracing::info!("first frame {}x{}", self.frame.width, self.frame.height);
+                    }
                     // Everything that belongs to this update is in the frame
                     // buffer now; present it in one go instead of sweeping.
                     self.frame_complete = true;
@@ -1243,6 +1378,9 @@ impl App {
                             self.lang.t("自适应降频", "adaptive")
                         ));
                     }
+                    self.session_idle = backed_off;
+                    self.session_fps = fps;
+                    self.update_resolution_ladder(fps);
                     if backed_off {
                         // Low fps on a static desktop is the controller saving
                         // work, not a stall.
@@ -1254,6 +1392,7 @@ impl App {
                     message,
                     retryable,
                 } => {
+                    tracing::warn!("session error [{code}] {message} (retryable={retryable})");
                     self.error = Some(format!("[{code}] {message}"));
                     if !retryable || !self.draft.config.auto_reconnect {
                         self.status = "Disconnected".to_string();
@@ -2311,6 +2450,16 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(size) = ctx.input(|input| input.viewport().monitor_size) {
+            let scale = ctx.pixels_per_point();
+            let physical = (
+                (size.x * scale).round() as u32,
+                (size.y * scale).round() as u32,
+            );
+            if physical.0 > 0 && physical.1 > 0 {
+                self.client_screen = Some(physical);
+            }
+        }
         self.run_pending_connect();
         self.run_frame_bench(ctx);
         self.handle_tray(ctx);
@@ -2450,13 +2599,25 @@ impl eframe::App for App {
         // A live session needs a 60 Hz tick to present frames; an idle window
         // does not, and repainting it at 60 Hz cost ~11 % of a core in the soak
         // run for no visible benefit.
-        if self.session.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(16));
+        // Frames repaint themselves (`request_repaint` on FrameComplete), so the
+        // tick only paces the UI chrome: 60 Hz while the remote screen is
+        // changing, a slow tick when it is static or no session is open.
+        let tick = if self.session.is_none() {
+            Duration::from_millis(250)
+        } else if self.session_idle {
+            Duration::from_millis(100)
         } else {
-            ctx.request_repaint_after(Duration::from_millis(250));
-        }
+            Duration::from_millis(16)
+        };
+        ctx.request_repaint_after(tick);
     }
 }
+
+/// Frame rate below which the Auto resolution ladder steps the Mac display down.
+const FPS_FLOOR: f64 = 30.0;
+/// Consecutive one-second samples under `FPS_FLOOR` before stepping down, so a
+/// single slow second (a big scroll, a window animation) is not punished.
+const LOW_FPS_SAMPLES: u8 = 3;
 
 /// Longest a half-received frame may hold the display back before the partial
 /// result is shown anyway. Servers answer every request, so this is only a

@@ -64,6 +64,25 @@ if ($Attach) {
     Start-Sleep -Seconds 3
 }
 
+# 给 -Connect 一个连接确认：否则采样可能全程都在量一个空闲窗口（踩过一次）。
+if (-not $Attach -and $Connect) {
+    $logDir = Join-Path $env:APPDATA 'RustVNC\client\logs'
+    $probeDeadline = (Get-Date).AddSeconds(45)
+    $connected = $false
+    while ((Get-Date) -lt $probeDeadline -and -not $connected) {
+        Start-Sleep -Seconds 2
+        if (-not (Test-Path $logDir)) { continue }
+        $logFile = Get-ChildItem $logDir -Filter 'client.log.*' | Sort-Object LastWriteTime | Select-Object -Last 1
+        if (-not $logFile) { continue }
+        $connected = [bool](Get-Content $logFile.FullName -Tail 200 |
+            Select-String -Pattern 'auth done, client connected' -Quiet)
+    }
+    if (-not $connected) {
+        throw "45 秒内没看到 'client connected'：会话没有建立，拒绝在不连接的情况下采样。"
+    }
+    Write-Host "会话已建立（日志确认），开始采样。"
+}
+
 $logicalCores = [Environment]::ProcessorCount
 $started = Get-Date
 $deadline = $started.AddMinutes($Minutes)

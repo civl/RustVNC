@@ -164,7 +164,12 @@ impl ViewMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ResolutionPreset {
+    /// Fit the Mac display mode to the client screen and step down when the
+    /// frame rate drops. A 5K or 8K source must not stream at that size into a
+    /// 1440p window: every extra pixel costs the Mac a render and the client a
+    /// decode, for pixels the user cannot see.
     #[default]
+    Auto,
     Native,
     P1080,
     P1440,
@@ -172,10 +177,17 @@ pub enum ResolutionPreset {
 }
 
 impl ResolutionPreset {
-    pub const ALL: [Self; 4] = [Self::Native, Self::P1080, Self::P1440, Self::P4K];
+    pub const ALL: [Self; 5] = [
+        Self::Auto,
+        Self::Native,
+        Self::P1080,
+        Self::P1440,
+        Self::P4K,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Auto => "自动（按本机屏幕）",
             Self::Native => "原生",
             Self::P1080 => "1920×1080",
             Self::P1440 => "2560×1440",
@@ -183,12 +195,43 @@ impl ResolutionPreset {
         }
     }
 
+    /// A fixed target, if this preset names one.
+    ///
+    /// `Auto` returns `None` on purpose: its target depends on the client screen
+    /// and on the measured frame rate, so it is resolved per session by
+    /// [`Self::target_for_client`].
     pub fn dimensions(self) -> Option<(u16, u16)> {
         match self {
-            Self::Native => None,
+            Self::Auto | Self::Native => None,
             Self::P1080 => Some((1920, 1080)),
             Self::P1440 => Some((2560, 1440)),
             Self::P4K => Some((3840, 2160)),
+        }
+    }
+
+    /// The best preset for a client screen of `client` physical pixels.
+    ///
+    /// Picking the largest preset that fits keeps text sharp while refusing to
+    /// stream pixels the user's screen cannot show.
+    pub fn target_for_client(self, client: (u32, u32)) -> Option<Self> {
+        let candidates = [Self::P4K, Self::P1440, Self::P1080];
+        match self {
+            Self::Auto => candidates.into_iter().find(|preset| {
+                preset.dimensions().is_some_and(|(width, height)| {
+                    u32::from(width) <= client.0 && u32::from(height) <= client.1
+                })
+            }),
+            other if other.dimensions().is_some() => Some(other),
+            _ => None,
+        }
+    }
+
+    /// One rung down the ladder, or `None` when already at the smallest.
+    pub fn step_down(self) -> Option<Self> {
+        match self {
+            Self::Auto | Self::Native | Self::P4K => Some(Self::P1440),
+            Self::P1440 => Some(Self::P1080),
+            Self::P1080 => None,
         }
     }
 }
@@ -459,5 +502,56 @@ mod tests {
         let config = ClientConfig::default();
         assert!(config.encodings().contains(&VncEncoding::Raw));
         assert!(config.encodings().contains(&VncEncoding::Zrle));
+    }
+
+    #[test]
+    fn auto_resolution_fits_the_client_screen() {
+        // The real case: a 2560x1440 Windows display must not pull 8960 pixels
+        // per row from a Mac driving side-by-side virtual displays.
+        let fits = ResolutionPreset::Auto.target_for_client((2560, 1440));
+        assert_eq!(fits, Some(ResolutionPreset::P1440));
+        assert_eq!(
+            fits.and_then(|preset| preset.dimensions()),
+            Some((2560, 1440))
+        );
+
+        assert_eq!(
+            ResolutionPreset::Auto.target_for_client((1920, 1200)),
+            Some(ResolutionPreset::P1080)
+        );
+        assert_eq!(
+            ResolutionPreset::Auto.target_for_client((3840, 2160)),
+            Some(ResolutionPreset::P4K)
+        );
+        // Smaller than the smallest rung: leave the Mac alone rather than
+        // shrinking it to something the client cannot even display.
+        assert_eq!(ResolutionPreset::Auto.target_for_client((1280, 720)), None);
+    }
+
+    #[test]
+    fn fixed_presets_ignore_the_client_screen() {
+        assert_eq!(
+            ResolutionPreset::P4K.target_for_client((1920, 1080)),
+            Some(ResolutionPreset::P4K)
+        );
+        assert_eq!(
+            ResolutionPreset::Native.target_for_client((1920, 1080)),
+            None
+        );
+        assert_eq!(ResolutionPreset::Auto.dimensions(), None);
+        assert_eq!(ResolutionPreset::default(), ResolutionPreset::Auto);
+    }
+
+    #[test]
+    fn the_ladder_ends_at_1080p() {
+        assert_eq!(
+            ResolutionPreset::P4K.step_down(),
+            Some(ResolutionPreset::P1440)
+        );
+        assert_eq!(
+            ResolutionPreset::P1440.step_down(),
+            Some(ResolutionPreset::P1080)
+        );
+        assert_eq!(ResolutionPreset::P1080.step_down(), None);
     }
 }

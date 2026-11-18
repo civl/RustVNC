@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 use crate::audio::AudioCapture;
 use crate::clipboard;
-use crate::display::DisplayGuard;
+use crate::display::{self, DisplayGuard};
 use crate::protocol::{self, ControlMsg};
 use crate::tls;
 

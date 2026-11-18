@@ -17,6 +17,7 @@ use rustvnc_client::input::{key_to_keysym, text_to_keysyms};
 use rustvnc_client::profiles::{Profile, ProfileStore};
 use rustvnc_client::session::{Session, SessionEvent};
 use rustvnc_client::ssh::{self, HostKeyProbe};
+use rustvnc_client::update::{self, UpdateInfo};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use vnc::{ClientKeyEvent, ClientMouseEvent, Rect, X11Event};
@@ -201,6 +202,11 @@ struct App {
     quitting: bool,
     hidden_to_tray: bool,
     start_minimized: bool,
+    update_rx: Option<std::sync::mpsc::Receiver<Result<Option<UpdateInfo>, String>>>,
+    update_install_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    update_status: String,
+    available_update: Option<UpdateInfo>,
+    show_update: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -367,6 +373,11 @@ impl App {
             quitting: false,
             hidden_to_tray: false,
             start_minimized: std::env::args().any(|arg| arg == "--minimized"),
+            update_rx: None,
+            update_install_rx: None,
+            update_status: String::new(),
+            available_update: None,
+            show_update: false,
         }
     }
 
@@ -497,6 +508,130 @@ impl App {
                 self.active_tab = Some(active - 1);
             }
         }
+    }
+
+    fn update_url() -> String {
+        std::env::var("RUSTVNC_UPDATE_URL").unwrap_or_else(|_| {
+            "https://github.com/civl/RustVNC/releases/latest/download/update.json".to_string()
+        })
+    }
+
+    fn check_updates(&mut self) {
+        if self.update_rx.is_some() {
+            return;
+        }
+        let url = Self::update_url();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        self.update_status = "检查更新…".to_string();
+        std::thread::spawn(move || {
+            let result = update::check(&url).map_err(|err| format!("{err:#}"));
+            let _ = tx.send(result);
+        });
+    }
+
+    fn install_update(&mut self, ctx: &egui::Context) {
+        let Some(info) = self.available_update.clone() else {
+            return;
+        };
+        if self.update_install_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_install_rx = Some(rx);
+        self.update_status = format!("准备安装 {}…", info.version);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<()> {
+                let _backup = update::backup_current_exe()?;
+                let extension = std::path::Path::new(&info.url)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .unwrap_or("exe");
+                let dest = update::updates_dir()
+                    .join("downloads")
+                    .join(format!("RustVNC-{}.{}", info.version, extension));
+                let installer = update::download_and_verify(&info, &dest)?;
+                update::launch_installer(&installer)?;
+                Ok(())
+            })();
+            let _ = tx.send(result.map_err(|err| format!("{err:#}")));
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.update_rx {
+            match rx.try_recv() {
+                Ok(Ok(Some(info))) => {
+                    self.update_status = format!("发现新版本 {}", info.version);
+                    self.show_update = true;
+                    self.available_update = Some(info);
+                    self.update_rx = None;
+                }
+                Ok(Ok(None)) => {
+                    self.update_status = format!("已是最新版本 {}", update::current_version());
+                    self.update_rx = None;
+                }
+                Ok(Err(err)) => {
+                    self.update_status = format!("检查更新失败: {err}");
+                    self.update_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.update_rx = None,
+            }
+        }
+        if let Some(rx) = &self.update_install_rx {
+            match rx.try_recv() {
+                Ok(Ok(())) => {
+                    self.update_status = "安装程序已启动，应用将退出".to_string();
+                    self.quitting = true;
+                    self.update_install_rx = None;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Ok(Err(err)) => {
+                    self.update_status = format!("更新失败: {err}");
+                    self.update_install_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.update_install_rx = None;
+                }
+            }
+        }
+    }
+
+    fn update_window(&mut self, ctx: &egui::Context) {
+        let Some(info) = self.available_update.clone() else {
+            self.show_update = false;
+            return;
+        };
+        let mut open = self.show_update;
+        egui::Window::new("软件更新")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                ui.heading(format!("新版本 {}", info.version));
+                ui.label(format!("当前版本 {}", update::current_version()));
+                if !info.notes.is_empty() {
+                    ui.separator();
+                    ui.label(&info.notes);
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("下载并安装").clicked() {
+                        self.install_update(ctx);
+                        self.show_update = false;
+                    }
+                    if ui.button("稍后").clicked() {
+                        self.show_update = false;
+                    }
+                });
+                ui.label("安装包必须通过 SHA-256 校验；Windows 上还要求 Authenticode 有效。");
+            });
+        self.show_update = open;
     }
 
     fn set_autostart(&mut self, enabled: bool) {
@@ -1978,6 +2113,22 @@ impl App {
             {
                 self.error = Some(format!("open logs: {err:#}"));
             }
+            if ui.button(lang.t("检查更新", "Check updates")).clicked() {
+                self.check_updates();
+            }
+            if ui.button(lang.t("回滚", "Rollback")).clicked() {
+                if let Some(path) = update::rollback_installer() {
+                    match std::process::Command::new(&path).spawn() {
+                        Ok(_) => {
+                            self.quitting = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        Err(err) => self.error = Some(format!("rollback: {err}")),
+                    }
+                } else {
+                    self.update_status = "没有可回滚的版本".to_string();
+                }
+            }
             if ui.button(lang.t("导出诊断", "Diagnostics")).clicked() {
                 let mut summary = String::new();
                 summary.push_str(&format!("status: {}\nstats: {}\n", self.status, self.stats));
@@ -2016,6 +2167,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_tray(ctx);
+        self.poll_update(ctx);
         if self.start_minimized && self._tray.is_some() {
             self.start_minimized = false;
             self.hidden_to_tray = true;
@@ -2095,6 +2247,10 @@ impl eframe::App for App {
                     } else {
                         ui.label(&self.status);
                     }
+                    if !self.update_status.is_empty() {
+                        ui.separator();
+                        ui.label(&self.update_status);
+                    }
                     if self.session.is_some() {
                         ui.separator();
                         ui.label(&self.stats);
@@ -2138,6 +2294,9 @@ impl eframe::App for App {
 
         if self.show_keymap {
             self.keymap_window(ctx);
+        }
+        if self.show_update {
+            self.update_window(ctx);
         }
         self.handle_input(ctx);
         self.sync_clipboard();

@@ -9,6 +9,7 @@ description = "RustVNC Windows client (M1 session core + egui UI)"
 [dependencies]
 ab_glyph = "0.2"
 anyhow = "1"
+hex = "0.4"
 auto-launch = "0.6"
 arboard = "3"
 dirs = "7"
@@ -17,10 +18,12 @@ egui = "0.33"
 keyring = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ureq = "3"
 tray-icon = { version = "0.26", default-features = false }
 vnc-rs = "0.6"
 rustvnc-agent-client = { path = "../agent-client" }

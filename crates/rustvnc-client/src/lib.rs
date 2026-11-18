@@ -6,3 +6,4 @@ pub mod input;
 pub mod profiles;
 pub mod session;
 pub mod ssh;
+pub mod update;

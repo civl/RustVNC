@@ -1,113 +1,160 @@
 # RustVNC
 
-RustVNC 是一个用 Rust 构建、面向 Windows 用户的 macOS 远程桌面项目。
+[![CI](https://github.com/civl/RustVNC/actions/workflows/ci.yml/badge.svg)](https://github.com/civl/RustVNC/actions/workflows/ci.yml)
 
-它由两条并行的链路组成：
+用 Rust 构建、面向 Windows 用户的 **macOS 远程桌面**客户端。不做通用 VNC 浏览器：只把
+"从 Windows 用 Mac"这一件事做到原生手感——高分辨率出画、低延迟输入、剪贴板、音频、
+安装包与自动更新。
 
 ```text
 Windows 客户端 ── RFB/SSH (5900) ──────────► macOS screensharingd   画面 + 输入
-               └─ QUIC/TLS 1.3 (8443) ─────► RustVNC Agent         剪贴板 + 音频 + 控制
+               └─ QUIC / TLS 1.3 (8443) ───► RustVNC Agent         剪贴板 + 音频 + 控制
 ```
 
-- **原生引擎**（零安装）：标准 RFB，ZRLE / zlib / CopyRect / Raw，Apple ARD 账号认证与 VNC 密码认证。
-- **增强引擎**（在 Mac 上装 Agent）：剪贴板双向、Opus 系统音频、mTLS 配对；画面仍走 RFB，Agent 出问题只丢功能、不丢会话。
+两条链路刻意解耦：
+
+- **画面与输入走标准 RFB**，Mac 上零安装，兼容 Apple 原生屏幕共享；
+- **增强功能走 Agent**（QUIC + mTLS）：剪贴板双向、Opus 系统音频、远端分辨率控制。
+  Agent 挂了只丢这些功能，画面会话不受影响。
+
+## 特性
+
+| 分类 | 能力 |
+|---|---|
+| **画面** | ZRLE / zlib / CopyRect / Raw；16/32bpp；Apple 私有编码 1104/1107/1109/1110 解析；未知编码明确报错而非静默错乱 |
+| **传输** | 单请求在途 + 整帧呈现；自适应请求节奏（延迟 EMA + 双阈值滞回）；静止自动降频 |
+| **输入** | 完整修饰键状态机、Windows→macOS 修饰键映射（可配）、特殊键菜单、远端光标形状（32bpp） |
+| **视图** | 适应窗口 / 1:1 像素 / 50% / 100% / 200%，超出视口双向滚动；HiDPI 按 `pixels_per_point` 换算；全屏（F11） |
+| **会话** | 多标签（后台标签暂停请求、切回 `FullRefresh`）、自动重连（指数退避）、连接/握手超时 |
+| **系统** | 托盘常驻（关窗隐藏）、开机自启（`--minimized` 静默启动）、凭据存 Credential Manager、诊断日志与诊断包 |
+| **安装** | Inno Setup 安装包 + WiX per-user MSI；Authenticode 签名脚本；manifest 更新（SHA-256 校验 + 回滚） |
+| **Agent** | 8 位配对码（300 秒一次性，带尝试次数与按 IP 限流）、mTLS 证书固定、剪贴板、Opus 48 kHz 立体声、远端分辨率切换 |
+
+## 进度
+
+> 里程碑定义见 [design.md](design.md)，逐项细节见 M0/M1/M2 三份报告。
+
+| 里程碑 | 内容 | 状态 |
+|---|---|---|
+| **M0** | 协议兼容性（握手 / ARD 认证 / 编码 / Apple 伪编码） | ✅ |
+| **A0–A2b** | macOS Agent：骨架、QUIC 控制面、菜单栏与剪贴板、音频 | ✅ |
+| **M1** | Windows 客户端会话核心：出画、输入、重连、诊断 | ✅ |
+| **M2a** | 渲染 / DPI / 视图比例 | 🟡 多显示器裁切与选择未做 |
+| **M2b** | 自适应请求控制器（延迟 EMA + 滞回 + 静止降频） | ✅ |
+| **M2c** | 多标签 / 托盘 / 开机自启 | 🟡 系统通知未做 |
+| **M2d** | MSI / Authenticode / 自动更新 / 回滚 | 🟡 真实证书与更新服务器待补 |
+| **M2e** | 性能、内存、8 小时 soak | ⬜ 未开始 |
+
+## 快速开始
+
+### 1. 构建
+
+```powershell
+cargo build --release -p rustvnc-client
+.\target\release\rustvnc-client.exe
+```
+
+> **请用 release 运行**。5K 画面下 debug 构建的解码慢到肉眼可见（拖窗口像在扫屏）。
+
+要求：**Windows 11**（主支持；Windows 10 22H2 尽力兼容），x64 或 arm64；Rust 1.88+（edition 2024）。
+Mac 侧需 **macOS 14+** 并开启屏幕共享。显卡优先 D3D12，老机器依次回退到 Vulkan / OpenGL——
+见下方「关键设计取舍」。
+
+### 2. 首次连接
+
+1. Mac 上开启 **系统设置 → 通用 → 共享 → 屏幕共享**；
+2. 客户端"新建"：填主机、端口 5900，认证方式选"自动（优先 ARD）"；
+3. 账号密码存入 Windows 凭据管理器（不写配置文件）。
+
+### 3. SSH 隧道（可选）
+
+把 5900 关到公网之外。密码认证用 `SSH_ASKPASS`（客户端自身以 `--ssh-askpass` 模式运行）：
+Unix 需 OpenSSH 8.4+、Windows 需 8.6+；更早的版本会明确提示改用密钥，并提供一键生成
+ed25519 密钥 + `authorized_keys` 指引。host key 首次连接需显式信任（TOFU），更换会拒绝。
+
+### 4. Agent（可选，解锁增强功能）
+
+```bash
+# 在 Mac 上
+./scripts/build-app.sh release && ./scripts/install-app.sh
+```
+
+菜单栏打开 RustVNC Agent，把菜单栏显示的 **8 位配对码** 填进 Windows 客户端——配对码 300 秒内
+一次性有效（错误次数有上限与限流）。之后剪贴板与音频自动生效；远端分辨率需额外在 Mac 菜单栏
+开启"允许远程调整分辨率"。
+
+## 工程质量
+
+| 项目 | 现状 |
+|---|---|
+| 测试 | Windows 侧 **132 个**（含 mock RFB 端到端、QUIC 回环、像素级比对）；macOS 侧由 CI 覆盖 |
+| 质量门 | `cargo fmt --check`、`clippy -D warnings`、**debug 与 release 双模式测试**、actionlint + shellcheck |
+| 一键验收 | `powershell -File scripts/acceptance.ps1`（8 步，含真机探针） |
+| CI | 5 个 job：Ubuntu 26.04（workflow lint / cargo-deny）、macOS 26、Windows Server 2025 ×2 |
+| 产物 | `RustVNC-Setup-*.exe`（Inno）、`RustVNC.msi`（WiX per-user） |
+
+**为什么 release 也要跑测试**：16bpp "全黑"那个 bug 是整数溢出——debug 下 panic，
+release 下静默回绕，debug 测试永远发现不了。这条已固化进验收脚本和 CI。
+
+## 关键设计取舍
+
+- **渲染优先 D3D12**（wgpu）。纯 OpenGL 在无物理显示器、或通过 RustDesk 等远程工具查看的
+  机器上根本不呈现（应用内 framebuffer 回读证明画对了，swap 不出图 → 白屏）。回退链：
+  `D3D12 → Vulkan → OpenGL(wgpu) → glow`，用 `RUSTVNC_RENDERER=dx12|vulkan|gl|glow` 可强制。
+- **同一时刻只允许一个 `FramebufferUpdateRequest`**。多个请求在途会让服务端交错返回更新，
+  5K 下表现为撕裂/果冻。
+- **只在整帧收完后呈现**。服务端按矩形分块发送，收到一块就上屏会看到"自上而下扫描"。
+- **自适应请求节奏**：帧延迟 EMA > 200 ms 连续出现就放宽间隔（上限 500 ms），回落到低位后
+  恢复；画面静止 3 帧另降到 4 fps。可在 UI 关闭（关闭即锁定画质档帧率）。
+- **双链路**：增强功能全部走 Agent，任何 Agent 故障都不该影响画面会话。
+
+## 项目结构
+
+```text
+src/                        # macOS Agent：菜单栏、QUIC 控制面、剪贴板、音频、显示模式切换
+crates/rustvnc-client/      # Windows 客户端：RFB 会话、egui UI、SSH、视图/多标签/托盘、更新器
+crates/agent-client/        # Windows 侧 Agent 客户端：配对、剪贴板、Opus→WASAPI
+crates/rfb-probe/           # 协议探针（真机编码/分辨率诊断）
+vendor/vnc-rs/              # vnc-rs 0.6.1 + Apple/zlib/分块补丁（改动逐条记录在 PATCHES.md）
+resources/                  # Info.plist、LaunchAgent、entitlements
+scripts/                    # 构建 / 安装 / 公证 / 验收 / Apple 编码抓取
+packaging/windows/          # Inno Setup、WiX MSI、签名与更新 manifest 示例
+```
+
+代码规模约 12.7k 行 Rust（不含 vendored 引擎与测试夹具）。
 
 ## 文档
 
 - [总体设计（需求 / 架构 / 开发路径）](design.md)
-- [macOS Agent 设计（B1/B2、音频、视频、权限、配对）](agent-design.md)
-- [A0 骨架说明](README-A0.md) · [A1 控制面](README-A1.md) · [A2 菜单栏与剪贴板](README-A2.md) · [A2b 音频](README-A2B.md)
-- [M0 兼容性报告](M0-COMPATIBILITY.md)
-- [M1 / M1b 客户端状态报告](M1-STATUS.md)
-- [M2 执行计划](M2-PLAN.md)
-- [卡点分析与修复计划](BLOCKER-ANALYSIS.md)
-- [验收清单（真机）](ACCEPTANCE.md)
+- [macOS Agent 设计](agent-design.md)
+- [M0 兼容性报告](M0-COMPATIBILITY.md) · [M1 客户端状态](M1-STATUS.md) · [**M2 执行计划**](M2-PLAN.md)
+- [卡点分析与修复计划](BLOCKER-ANALYSIS.md) · [真机验收清单](ACCEPTANCE.md)
+- Agent 侧分册：[A0 骨架](README-A0.md) · [A1 控制面](README-A1.md) · [A2 菜单栏与剪贴板](README-A2.md) · [A2b 音频](README-A2B.md)
 
-## 当前进度
+## 已知限制
 
-> **M0** 是协议里程碑；**A0–A2b** 是 macOS Agent 侧；**M1/M1b** 是 Windows 客户端侧。
+- **多显示器**：仍是 macOS 合成的单个 framebuffer，未做按屏裁切/选择（M2a 收尾项）。
+- **Apple 1105（显示几何）**：在 BetterDisplay 虚拟屏 + PointerPos + 指针移动 + 模式切换的
+  真机实验中始终不发送，判定属于 Apple 高性能扩展；候选解析器仅作诊断保留，标准路径不依赖。
+- **远端光标形状仅 32bpp**：16bpp（极速）不请求光标编码，仍显示本地指针。
+- **D3D11 不可用**：wgpu 只有 DX12/Vulkan/GL 后端。仅 D3D11 级显卡的机器实际落到 GL 或 glow；
+  要真 D3D11 需自带 ANGLE 或另写渲染器。
+- **通知**：托盘/多标签/开机自启已做，系统通知未做。
+- **签名与更新**：脚本与校验链路完备，但真实证书的 Authenticode、公证、以及公网更新服务器
+  尚未配置；`RUSTVNC_UPDATE_URL` 可指向自建 manifest。
+- **未实测**：8 小时 soak、4K/60 本地呈现基准、输入 P95 延迟（需要可连的 Mac + 真机）。
+- **Windows 上 `cargo check --workspace` 会失败**：根包 `rustvnc-agent` 是 macOS-only，
+  请按平台指定 `-p`。
 
-### 已实现并经测试验证
+## 故障排查
 
-| 能力 | 状态 | 验证方式 |
-|---|---|---|
-| RFB 握手 / Apple ARD / VNC 密码 | ✅ | mock 端到端 + 真机握手（M0 报告） |
-| ZRLE / **zlib(6)** / CopyRect / Raw | ✅ | `encoding_compat` 端到端解码比对像素 |
-| Apple 私有编码 1104/1105/1107/1109/1110 | ⚠️ 部分解析 | 1104 光标几何、1109 布局、1110 机型已解析并记录；1105 用候选布局校验后记录，未驱动视口；未知安全跳过 |
-| 未知编码 | ✅ 明确报错 | 一次性失败并给出编码号，不进入重连风暴 |
-| 键鼠输入 / 修饰键状态机 / 特殊键菜单 / 按键映射 | ✅ | 单测 + 物理键位映射 |
-| 连接管理 / 配置 CRUD / 导入导出 | ✅ | 单测 |
-| 凭据存储（Credential Manager / Keychain） | ✅ | 单测（内存后端） |
-| 自动重连（指数退避，短会话不重置） | ✅ | mock 测试 |
-| 空闲 CPU | ✅ 0.000s / 3s | `idle_cost` 回归测试（曾为 100% 单核） |
-| 连接 / 握手超时 | ✅ 10s / 15s | 代码路径 + 超时分支 |
-| **Agent 通道：配对 / 剪贴板 / 音频 / 分辨率** | ✅ | QUIC+TLS 回环；真机 5K→1080p→5K |
-| SSH 隧道：host key 首次信任、stderr 透出、密钥生成 | ✅ | 单测（known_hosts 匹配、命令加固、错误提示） |
-| 诊断日志 / 诊断包 | ✅ | 手动冒烟 |
-| M2b 自适应请求控制器 | ✅ | 延迟 EMA + 双阈值滞回 + 4 个单测；HUD |
-| M2c 多标签 / 托盘 / 开机自启 | ✅ | 后台标签暂停；托盘显示/退出；登录时 `--minimized` |
-| M2a 视图比例 / HiDPI | ✅ 部分 | 适应/1:1/50/100/200 + 滚动；多显示器仍为合并 framebuffer |
-| M2d 安装/更新/回滚 | ✅ 部分 | Inno + WiX MSI（CI 产物已验证）；manifest + SHA-256 + Authenticode + 回滚；真证书待补 |
-
-### 已知限制
-
-- **SSH 密码认证需要新版 OpenSSH**：现在通过 `SSH_ASKPASS`（客户端自身以
-  `--ssh-askpass` 模式运行）支持密码，Unix 需 OpenSSH 8.4+、Windows 需 8.6+；
-  旧版仍会明确提示改用密钥（提供一键生成 ed25519 密钥 + `authorized_keys` 指引）。
-- **Apple 1105 标准 RFB 路径不发送**：在 BetterDisplay 8960×2880 虚拟屏 + PointerPos + 指针移动 + 显示模式切换的真机实验中，仍只收到 1107/1109/1110。1105 疑似属于 Apple 高性能扩展（0x1d/0x451），当前标准客户端不依赖它；候选解析器仅保留为诊断。1104 的 hotspot/size 仅记录，光标形状由标准 `-239` 提供。
-- **真机指标未测**：1080p 30 分钟稳定性、帧率、输入 P95 需要一台可连的 Mac +
-  Windows 真机，见 [ACCEPTANCE.md](ACCEPTANCE.md)。
-- **自适应帧率**：按“请求 → 完整帧”延迟的 EMA 自动降/升请求间隔（200 ms / 80 ms 双阈值、连续帧滞回，上限 500 ms）；画面静止 3 帧后另降到 4 fps。关闭“自适应帧率”即锁定画质档帧率。状态栏显示延迟、自适应间隔和「静止降频」。
-- **多标签**：后台标签保持 RFB 连接但暂停请求、丢弃帧；切回时 `FullRefresh`，避免后台堆积帧内存。后台标签的 Agent 音频会停止，切回重连。
-- **远端分辨率（实验性）**：仅主显示器、仅会话开始时切换；客户端可选 1080p/1440p/4K，
-  需要 Mac 菜单栏“允许远程调整分辨率”开启；断开或崩溃后恢复原模式，运行中不动态改。
-- **远端光标形状**：32bpp 画质下跟随服务器下发的光标位图（热点、掩码都已处理），鼠标进入远程画面时隐藏本地指针、改画远端形状；16bpp（极速）不请求光标编码，仍显示本地指针。
-- **渲染后端按 D3D12 → Vulkan → OpenGL(wgpu) → glow 的顺序尝试**，第一个能初始化的生效。
-  Windows 上优先 **D3D12**：它是 DWM 合成与远程抓屏（RustDesk/RDP）真正预期的 API，
-  而纯 OpenGL 在无物理显示器/间接显示器上**根本不呈现**（应用内 framebuffer 回读证明画对了
-  但 swap 不出图，表现为白板）。
-  - `RUSTVNC_RENDERER=dx12|vulkan|gl|glow` 可强制单一后端（排查用）
-  - **D3D11 无法通过 wgpu 获得**（wgpu 只有 DX12/Vulkan/GL 后端）。若目标机器仅有 D3D11
-    级显卡，实际落点是 wgpu 的 GL 后端或 glow；真要 D3D11 需自带 ANGLE 或写自定义渲染器，
-    当前不做。`RUSTVNC_RENDERER=gl` 可显式走 wgpu 的 OpenGL 后端做对照。
-- Agent 安装包需要 Developer ID 签名 + 公证才能分发给他人（脚本已就绪，证书自备）。
-
-## 目录
-
-```text
-src/                        # macOS Agent（菜单栏、QUIC 控制面、剪贴板、音频）
-crates/rustvnc-client/      # Windows 客户端（RFB 会话 + egui UI + SSH）
-crates/agent-client/        # Windows 侧 Agent 客户端（配对、剪贴板、Opus→WASAPI）
-crates/rfb-probe/           # M0 协议探针
-vendor/vnc-rs/              # vnc-rs 0.6.1 + Apple 编码/zlib 补丁（见 PATCHES.md）
-resources/                  # Info.plist、LaunchAgent plist、entitlements
-scripts/                    # 构建 / 安装 / 公证 / 验收
-packaging/windows/          # Inno Setup + 签名脚本
-```
-
-## 构建与测试
-
-```bash
-# Windows 客户端 + Agent 客户端 + 探针 + 协议引擎
-cargo test -p rustvnc-client -p rustvnc-agent-client -p rfb-probe -p vnc-rs
-cargo clippy -p rustvnc-client -p rustvnc-agent-client -p rfb-probe -p vnc-rs --all-targets -- -D warnings
-
-# macOS Agent（只能在 macOS 上编译）
-cargo test --workspace
-./scripts/build-app.sh release
-```
-
-> 根包 `rustvnc-agent` 是 macOS-only，所以 Windows 上 `cargo check --workspace`
-> 会失败；CI 按平台拆成 `macos` 与 `windows-client` 两个 job。
->
-> 客户端请用 **release** 运行：5K 画面下 debug 构建的解码慢到肉眼可见（拖窗口像在扫屏），
-> `cargo build --release -p rustvnc-client` 后再跑。
-
-一键验收：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/acceptance.ps1
-```
+| 现象 | 处理 |
+|---|---|
+| 窗口空白/白屏 | 已在默认路径修复（wgpu/D3D12）。仍出现则 `RUSTVNC_RENDERER=glow` 对照，并附日志 |
+| 画面撕裂、"果冻"、像在扫描 | 确认用 release 构建；再看状态栏 fps 与「静止降频」标记 |
+| 极速（16bpp）偏色/发黑 | 0.1.0 已修（RGB565 通道缩放溢出）；老版本请升级 |
+| SSH 认证失败 | 检查 OpenSSH 版本（密码需 8.4+/Windows 8.6+），或改用密钥 |
+| 日志位置 | `%APPDATA%\RustVNC\client\logs`；"诊断" 页可一键导出诊断包 |
 
 ## 许可
 

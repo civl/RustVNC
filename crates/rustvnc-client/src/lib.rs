@@ -2,6 +2,7 @@ pub mod config;
 pub mod credentials;
 pub mod diag;
 pub mod fonts;
+pub mod host;
 pub mod input;
 pub mod notify;
 pub mod profiles;

@@ -23,12 +23,19 @@ BIN="$ROOT/target/$TARGET_DIR/rustvnc-client"
 APP="$ROOT/dist/RustVNC.app"
 
 # Always build: skipping when the binary exists shipped a stale app once.
-echo "building rustvnc-client ($PROFILE)…"
-( cd "$ROOT" && cargo build "-p" rustvnc-client --"$PROFILE" )
+echo "building rustvnc-client + rustvnc-agent ($PROFILE)…"
+# The agent is the host half of the app: same bundle, second binary.
+( cd "$ROOT" && cargo build "-p" rustvnc-client -p rustvnc-agent --"$PROFILE" )
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/rustvnc-client"
+AGENT_BIN="$ROOT/target/$TARGET_DIR/rustvnc-agent"
+if [[ -x "$AGENT_BIN" ]]; then
+  cp "$AGENT_BIN" "$APP/Contents/MacOS/rustvnc-agent"
+else
+  echo "warning: $AGENT_BIN missing; the bundle will be controller-only" >&2
+fi
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

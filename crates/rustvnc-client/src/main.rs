@@ -47,6 +47,8 @@ struct StartupOptions {
     bench_out: Option<std::path::PathBuf>,
     /// Grab the UI once (in-app screenshot) and exit: `--screenshot <path>`.
     screenshot: Option<std::path::PathBuf>,
+    /// Start sharing this Mac at launch (`--share`).
+    share: bool,
 }
 
 fn startup_options() -> StartupOptions {
@@ -58,6 +60,7 @@ fn startup_options() -> StartupOptions {
             "--bench-frames" => options.bench_seconds = args.next().and_then(|v| v.parse().ok()),
             "--bench-out" => options.bench_out = args.next().map(std::path::PathBuf::from),
             "--screenshot" => options.screenshot = args.next().map(std::path::PathBuf::from),
+            "--share" => options.share = true,
             _ => {}
         }
     }
@@ -338,6 +341,14 @@ struct App {
     screenshot_path: Option<std::path::PathBuf>,
     screenshot_requested: bool,
     screenshot_started: Instant,
+    /// Sharing panel ("share this Mac"): the host half of the app.
+    show_share: bool,
+    share_allow_resolution: bool,
+    share_code: Option<String>,
+    share_fingerprint: Option<String>,
+    share_running: bool,
+    share_error: Option<String>,
+    share_checked: Instant,
     /// Show the two-card landing screen instead of the connection form.
     show_home: bool,
     /// `--connect`: profile to select and connect to on the first frame.
@@ -674,6 +685,13 @@ impl App {
             screenshot_path: startup.screenshot.clone(),
             screenshot_requested: false,
             screenshot_started: Instant::now(),
+            show_share: startup.share,
+            share_allow_resolution: true,
+            share_code: None,
+            share_fingerprint: None,
+            share_running: false,
+            share_error: None,
+            share_checked: Instant::now(),
             show_home: true,
             pending_connect: startup.connect.clone(),
             bench: startup.bench_seconds.map(|seconds| {
@@ -2056,6 +2074,140 @@ impl App {
         std::process::exit(0);
     }
 
+    /// `--share`: begin hosting immediately (also used by the automated UI check).
+    fn start_share_if_requested(&mut self) {
+        if !self.show_share {
+            return;
+        }
+        self.toggle_share(true);
+    }
+
+    fn refresh_share_state(&mut self) {
+        self.share_running = rustvnc_client::host::running();
+        let (code, fingerprint) = rustvnc_client::host::last_announcement();
+        if code.is_some() {
+            self.share_code = code;
+        }
+        if fingerprint.is_some() {
+            self.share_fingerprint = fingerprint;
+        }
+        self.share_checked = Instant::now();
+    }
+
+    fn toggle_share(&mut self, start: bool) {
+        if start {
+            match rustvnc_client::host::start(self.share_allow_resolution) {
+                Ok(log) => {
+                    self.share_error = None;
+                    self.status = format!("共享已开启，日志 {}", log.display());
+                }
+                Err(err) => self.share_error = Some(err),
+            }
+        } else {
+            rustvnc_client::host::stop();
+            self.share_code = None;
+            self.status = "共享已停止".to_string();
+        }
+        self.refresh_share_state();
+    }
+
+    /// The host half of the app: start/stop the bundled agent, show the code the
+    /// other side types in, and say what still needs a system permission.
+    fn share_window(&mut self, ctx: &egui::Context) {
+        let lang = self.lang;
+        if self.share_checked.elapsed() > Duration::from_secs(1) {
+            self.refresh_share_state();
+        }
+        let mut open = self.show_share;
+        egui::Window::new(lang.t("共享本机", "Share this Mac"))
+            .open(&mut open)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(if self.share_running {
+                        lang.t("被控端正在运行", "Host service running")
+                    } else {
+                        lang.t("被控端未运行", "Host service stopped")
+                    })
+                    .size(16.0)
+                    .strong(),
+                );
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(lang.t("配对码", "Pairing code"));
+                    match &self.share_code {
+                        Some(code) => {
+                            ui.label(
+                                egui::RichText::new(code)
+                                    .size(26.0)
+                                    .monospace()
+                                    .strong(),
+                            );
+                            if ui.button(lang.t("复制", "Copy")).clicked() {
+                                ctx.copy_text(code.clone());
+                                self.status = lang.t("配对码已复制", "Pairing code copied").to_string();
+                            }
+                        }
+                        None => {
+                            ui.label(
+                                egui::RichText::new(lang.t(
+                                    "开启后显示（300 秒内有效）",
+                                    "shown once running (valid 300 s)",
+                                ))
+                                .weak(),
+                            );
+                        }
+                    }
+                });
+                if let Some(fingerprint) = &self.share_fingerprint {
+                    let short: String = fingerprint.chars().take(16).collect();
+                    ui.label(
+                        egui::RichText::new(format!("{}: {short}…", lang.t("指纹", "Fingerprint")))
+                            .small()
+                            .weak(),
+                    );
+                }
+
+                ui.add_space(6.0);
+                ui.checkbox(
+                    &mut self.share_allow_resolution,
+                    lang.t(
+                        "允许远程调整分辨率（会话结束后恢复）",
+                        "Allow remote resolution changes (restored afterwards)",
+                    ),
+                );
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if self.share_running {
+                        if ui.button(lang.t("停止共享", "Stop sharing")).clicked() {
+                            self.toggle_share(false);
+                        }
+                    } else if ui.button(lang.t("开始共享", "Start sharing")).clicked() {
+                        self.toggle_share(true);
+                    }
+                    if ui.button(lang.t("刷新", "Refresh")).clicked() {
+                        self.refresh_share_state();
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(lang.t(
+                        "首次使用需在 系统设置 → 隐私与安全性 授予“屏幕录制”（单屏镜像需要）与“屏幕与系统录音”（音频需要）。",
+                        "Grant Screen Recording (single-screen mirroring) and Screen & System Audio (audio) in System Settings → Privacy & Security on first run.",
+                    ))
+                    .small()
+                    .weak(),
+                );
+                if let Some(error) = &self.share_error {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                }
+            });
+        self.show_share = open;
+    }
+
     /// Landing screen: two cards, like RustDesk — "control a Mac" or "share this
     /// Mac". It is the whole first screen; the connection form only appears once
     /// the user picked a direction.
@@ -2157,14 +2309,9 @@ impl App {
                 .output()
                 .map(|out| out.status.success())
                 .unwrap_or(false);
-            self.status = if running {
-                "RustVNC Agent 正在运行：在 Mac 菜单栏查看配对码".to_string()
-            } else {
-                "正在打开 RustVNC Agent…".to_string()
-            };
-            let _ = std::process::Command::new("open")
-                .args(["-a", "RustVNC Agent"])
-                .status();
+            self.show_share = true;
+            self.share_running = running;
+            self.refresh_share_state();
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -3245,6 +3392,7 @@ impl eframe::App for App {
         self.capture_window_state(ctx);
         self.poll_raise_request(ctx);
         self.run_pending_connect();
+        self.start_share_if_requested();
         self.poll_host_key_probe();
         if self.host_key_probe_rx.is_some() {
             // An idle window is not repainted by egui, so a finished probe would
@@ -3412,6 +3560,9 @@ impl eframe::App for App {
         }
         if self.show_region {
             self.region_window(ctx);
+        }
+        if self.show_share {
+            self.share_window(ctx);
         }
         if self.show_update {
             self.update_window(ctx);

@@ -17,6 +17,7 @@ use rustvnc_client::input::{key_to_keysym, text_to_keysyms};
 use rustvnc_client::profiles::{Profile, ProfileStore};
 use rustvnc_client::session::{Session, SessionEvent};
 use rustvnc_client::ssh::{self, HostKeyProbe};
+use rustvnc_client::ui_state::UiState;
 use rustvnc_client::update::{self, UpdateInfo};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -166,9 +167,30 @@ fn run_native(attempt: RenderAttempt, startup: StartupOptions) -> eframe::Result
         RenderAttempt::Wgpu { backends } => wgpu_configuration(backends),
         RenderAttempt::Glow => Default::default(),
     };
+    // The window exists before `App` does, so the saved geometry has to be read
+    // here rather than in `App::new`. A corrupt file must not block start-up:
+    // it is logged and treated as an empty workspace.
+    let ui_path = UiState::default_path();
+    let ui_state = match UiState::load(&ui_path) {
+        Ok(state) => state,
+        Err(err) => {
+            tracing::warn!("ignoring {}: {err:#}", ui_path.display());
+            UiState::default()
+        }
+    };
+    let mut viewport = egui::ViewportBuilder::default().with_inner_size([1120.0, 720.0]);
+    if let Some(size) = ui_state.window.inner_size() {
+        viewport = viewport.with_inner_size(size);
+    }
+    if let Some(position) = ui_state.window.position() {
+        viewport = viewport.with_position(position);
+    }
+    if ui_state.window.maximized {
+        viewport = viewport.with_maximized(true);
+    }
     tracing::info!("starting UI with {attempt:?}");
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1120.0, 720.0]),
+        viewport,
         renderer,
         wgpu_options,
         ..Default::default()
@@ -176,7 +198,7 @@ fn run_native(attempt: RenderAttempt, startup: StartupOptions) -> eframe::Result
     eframe::run_native(
         "RustVNC",
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, startup)))),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, startup, ui_state)))),
     )
 }
 
@@ -191,6 +213,23 @@ impl Lang {
         match self {
             Self::Zh => zh,
             Self::En => en,
+        }
+    }
+
+    /// Stable tag for `ui.json`; the enum itself is not serialised so a rename
+    /// cannot invalidate a saved workspace.
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Zh => "zh",
+            Self::En => "en",
+        }
+    }
+
+    fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "zh" => Some(Self::Zh),
+            "en" => Some(Self::En),
+            _ => None,
         }
     }
 }
@@ -282,6 +321,10 @@ struct App {
     /// and its frame in `frame` so all existing rendering code stays single-tab.
     tabs: Vec<Tab>,
     active_tab: Option<usize>,
+    /// The workspace as it was restored, kept up to date with the window
+    /// geometry so [`Self::persist_ui`] can write the whole thing back.
+    ui_state: UiState,
+    ui_state_path: std::path::PathBuf,
     autostart: Option<AutoLaunch>,
     autostart_enabled: bool,
     _tray: Option<TrayIcon>,
@@ -443,7 +486,11 @@ impl App {
         self.agent_status
             .push_str(&format!(" · 帧率不足，已降到 {width}×{height}"));
     }
-    fn new(cc: &eframe::CreationContext<'_>, startup: StartupOptions) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        startup: StartupOptions,
+        mut ui_state: UiState,
+    ) -> Self {
         rustvnc_client::fonts::install_cjk_font(&cc.egui_ctx);
         let path = ProfileStore::default_path();
         let (profiles, error) = match ProfileStore::load(&path) {
@@ -453,26 +500,55 @@ impl App {
                 Some(format!("load profiles: {err:#}")),
             ),
         };
-        let draft = profiles
-            .profiles()
-            .first()
-            .cloned()
+        let credentials = CredentialStore::system();
+        // Rebuild the workspace: the saved tabs whose profile still exists, in
+        // their saved order. Tabs come back without a session — restoring must
+        // never dial out on its own, or an autostart at login would open N SSH
+        // tunnels behind the user's back.
+        ui_state.sanitize(|id| profiles.get(id).is_some());
+        let tabs: Vec<Tab> = ui_state
+            .tabs
+            .iter()
+            .filter_map(|id| profiles.get(id))
+            .map(|profile| Tab {
+                profile: profile.clone(),
+                session: None,
+            })
+            .collect();
+        let active_tab = ui_state.active.filter(|index| *index < tabs.len());
+        let mut draft = active_tab
+            .and_then(|index| tabs.get(index).map(|tab| tab.profile.clone()))
+            .or_else(|| profiles.profiles().first().cloned())
             .unwrap_or_else(|| Profile::new("New Mac", ClientConfig::default()));
+        // Same credential hydration as `activate_tab`: a restored tab must be
+        // connectable without being switched away from and back first.
+        draft.config.ssh.password = credentials
+            .get(&ssh_credential_key(&draft.id))
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let password = credentials
+            .get(&draft.id)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let selected_id = profiles.get(&draft.id).map(|_| draft.id.clone());
+        let lang = ui_state
+            .lang
+            .as_deref()
+            .and_then(Lang::from_tag)
+            .unwrap_or(Lang::Zh);
         let (tray, tray_rx) = build_tray(cc.egui_ctx.clone());
         let (autostart, autostart_enabled) = init_autostart();
-        let selected_id = profiles
-            .profiles()
-            .first()
-            .map(|profile| profile.id.clone());
 
         Self {
-            lang: Lang::Zh,
+            lang,
             profiles,
             selected_id,
             draft,
-            password: String::new(),
+            password,
             remember: true,
-            credentials: CredentialStore::system(),
+            credentials,
             session: None,
             frame: Frame::default(),
             texture: None,
@@ -521,8 +597,10 @@ impl App {
             pending_resolution: None,
             agent_pair_rx: None,
             show_keymap: false,
-            tabs: Vec::new(),
-            active_tab: None,
+            tabs,
+            active_tab,
+            ui_state,
+            ui_state_path: UiState::default_path(),
             autostart,
             autostart_enabled,
             _tray: tray,
@@ -535,6 +613,42 @@ impl App {
             update_status: String::new(),
             available_update: None,
             show_update: false,
+        }
+    }
+
+    /// Track the window geometry so a later [`Self::persist_ui`] can save it.
+    ///
+    /// Called every frame because a resize or a drag produces no dedicated
+    /// event here, and the values are only read when something is written.
+    fn capture_window_state(&mut self, ctx: &egui::Context) {
+        let viewport = ctx.input(|input| input.viewport().clone());
+        if let Some(rect) = viewport.inner_rect {
+            let size = rect.size();
+            if size.x > 0.0 && size.y > 0.0 {
+                self.ui_state.window.width = Some(size.x);
+                self.ui_state.window.height = Some(size.y);
+            }
+        }
+        if let Some(rect) = viewport.outer_rect {
+            self.ui_state.window.x = Some(rect.min.x);
+            self.ui_state.window.y = Some(rect.min.y);
+        }
+        if let Some(maximized) = viewport.maximized {
+            self.ui_state.window.maximized = maximized;
+        }
+    }
+
+    /// Write the workspace (tabs, active tab, geometry, language).
+    ///
+    /// Called on every tab mutation and on exit rather than on a dirty-flag
+    /// timer: tab changes are rare, the file is a couple of hundred bytes, and
+    /// the write is atomic, so there is nothing to lose by being eager.
+    fn persist_ui(&mut self) {
+        self.ui_state.tabs = self.tabs.iter().map(|tab| tab.profile.id.clone()).collect();
+        self.ui_state.active = self.active_tab;
+        self.ui_state.lang = Some(self.lang.tag().to_string());
+        if let Err(err) = self.ui_state.save(&self.ui_state_path) {
+            tracing::warn!("save {}: {err:#}", self.ui_state_path.display());
         }
     }
 
@@ -564,6 +678,7 @@ impl App {
             self.error = None;
             self.status = "Ready".to_string();
         }
+        self.persist_ui();
     }
 
     /// Move the active session into its tab and pause it. The active session
@@ -637,6 +752,7 @@ impl App {
             self.session = None;
             self.status = "Ready".to_string();
         }
+        self.persist_ui();
     }
 
     fn close_tab(&mut self, index: usize) {
@@ -666,6 +782,7 @@ impl App {
                 self.active_tab = Some(active - 1);
             }
         }
+        self.persist_ui();
     }
 
     fn update_url() -> String {
@@ -884,6 +1001,7 @@ impl App {
                 self.password.clear();
                 self.selected_id = None;
                 self.status = "Ready".to_string();
+                self.persist_ui();
             }
         });
         if let Some(index) = activate {
@@ -998,6 +1116,7 @@ impl App {
         self.password.clear();
         self.error = None;
         self.status = "Ready".to_string();
+        self.persist_ui();
     }
 
     fn save_profile(&mut self) {
@@ -1058,6 +1177,7 @@ impl App {
         } else if let Some(index) = self.active_tab {
             self.tabs[index].profile = self.draft.clone();
         }
+        self.persist_ui();
         if self.remember && !self.password.is_empty() {
             let _ = self.credentials.set(&self.draft.id, &self.password);
         } else if !self.remember {
@@ -2574,6 +2694,12 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Last chance to record where the window was: the event loop is going away
+    /// and `update` will not run again.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.persist_ui();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(size) = ctx.input(|input| input.viewport().monitor_size) {
             let scale = ctx.pixels_per_point();
@@ -2585,6 +2711,7 @@ impl eframe::App for App {
                 self.client_screen = Some(physical);
             }
         }
+        self.capture_window_state(ctx);
         self.run_pending_connect();
         self.poll_host_key_probe();
         if self.host_key_probe_rx.is_some() {
@@ -2654,6 +2781,7 @@ impl eframe::App for App {
                                 Lang::Zh => Lang::En,
                                 Lang::En => Lang::Zh,
                             };
+                            self.persist_ui();
                         }
                     });
                 });
@@ -2760,6 +2888,11 @@ impl eframe::App for App {
         } else {
             Duration::from_millis(16)
         };
+        if self.quitting {
+            // `on_exit` is the backstop; writing here means the geometry is the
+            // one on screen rather than whatever the loop last captured.
+            self.persist_ui();
+        }
         ctx.request_repaint_after(tick);
     }
 }

@@ -75,8 +75,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
+      - name: Install Inno Setup and WiX
+        run: |
+          choco install innosetup -y --no-progress
+          choco install wixtoolset -y --no-progress
+      - name: Resolve version
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".Trim().TrimStart("v")
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$') {
+            throw "invalid release version: $version"
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Materialise signing certificate
         if: env.WINDOWS_SIGN_CERT_BASE64 != ''
         shell: pwsh
@@ -86,10 +96,46 @@ jobs:
           "RUSTVNC_SIGN_CERT=$path" | Out-File -FilePath $env:GITHUB_ENV -Append
           "RUSTVNC_SIGN_PASSWORD=$env:WINDOWS_SIGN_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Append
           "RUSTVNC_REQUIRE_SIGN=1" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Build installer
-        run: powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1
+      - name: Build EXE and MSI
+        run: |
+          powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1 -Version $env:VERSION
+          powershell -ExecutionPolicy Bypass -File packaging/windows/build-msi.ps1 -Version $env:VERSION
+      - name: Generate update manifest
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem packaging/windows/output/*.exe | Select-Object -First 1
+          if (-not $exe) { throw "installer EXE not found" }
+          $sha = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          $url = "https://github.com/civl/RustVNC/releases/download/${{ github.ref_name }}/$($exe.Name)"
+          $manifest = [ordered]@{
+            version = $env:VERSION
+            url = $url
+            sha256 = $sha
+            notes = "RustVNC $env:VERSION. See the release notes for details."
+          } | ConvertTo-Json
+          Set-Content -Path packaging/windows/output/update.json -Value $manifest -Encoding utf8
       - uses: actions/upload-artifact@v7
         with:
           name: rustvnc-windows-installer
-          path: packaging/windows/output/*.exe
+          path: |
+            packaging/windows/output/*.exe
+            packaging/windows/output/*.msi
+            packaging/windows/output/update.json
           if-no-files-found: error
+
+  publish:
+    needs: [macos-agent, windows-client]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" artifacts/* \
+            --title "RustVNC ${GITHUB_REF_NAME}" --generate-notes

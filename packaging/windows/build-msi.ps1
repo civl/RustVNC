@@ -1,5 +1,8 @@
 # Build a per-user WiX MSI from the already-staged client executable.
 # Requires WiX Toolset 3.x (choco install wixtoolset -y).
+param(
+    [string]$Version = "0.1.0"
+)
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $stage = Join-Path $PSScriptRoot "stage"
@@ -33,7 +36,7 @@ if (-not $candle -or -not $light) {
 New-Item -ItemType Directory -Force -Path $output, $obj | Out-Null
 Push-Location $PSScriptRoot
 try {
-    & $candle -arch x64 "-dStageDir=$stage" Product.wxs -out (Join-Path $obj "Product.wixobj")
+    & $candle -arch x64 "-dStageDir=$stage" "-dVersion=$Version" Product.wxs -out (Join-Path $obj "Product.wixobj")
     if ($LASTEXITCODE -ne 0) { throw "candle failed" }
     & $light -out (Join-Path $output "RustVNC.msi") (Join-Path $obj "Product.wixobj")
     if ($LASTEXITCODE -ne 0) { throw "light failed" }

@@ -1,3 +1,6 @@
+param(
+    [string]$Version = "0.1.0"
+)
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 Push-Location $root
@@ -27,7 +30,7 @@ try {
         Write-Host "Staged EXE: $stage\rustvnc-client.exe"
         exit 2
     }
-    & $isccPath (Join-Path $PSScriptRoot "rustvnc.iss")
+    & $isccPath "/DMyAppVersion=$Version" (Join-Path $PSScriptRoot "rustvnc.iss")
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
     # Sign the installer itself, otherwise SmartScreen blocks the download.

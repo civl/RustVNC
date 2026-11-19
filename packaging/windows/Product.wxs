@@ -3,7 +3,7 @@
   <Product Id="*"
            Name="RustVNC"
            Language="1033"
-           Version="0.1.0"
+           Version="$(var.Version)"
            Manufacturer="RustVNC"
            UpgradeCode="1C72197C-B61E-463F-B7BF-3135721D4446">
     <Package InstallerVersion="500"

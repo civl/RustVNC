@@ -16,7 +16,7 @@
 | M2a | 渲染 / DPI / 多显示器 / 比例切换 | 部分完成：D3D12/Vulkan/GL/glow 回退；全屏；Fit/1:1/50/100/200 + 滚动；**分辨率自动匹配客户端屏幕 + 帧率 <30 逐级下退（真机验证，见下）**；多显示器仍为合并 framebuffer | ✅ 比例/DPI/自动降分辨率 |
 | M2b | 自适应控制器：快/慢环、滞回、手动锁定、HUD | ✅ 本轮已实现：延迟 EMA、双阈值、HUD、开关 | 完成 |
 | M2c | 多标签 / 托盘 / 通知 / 开机自启 | ✅ 多标签、托盘、开机自启已实现；通知待做 | 完成（通知除外） |
-| M2d | MSI/Authenticode/自动更新/回滚 | 自动更新/校验/回滚 + Inno + WiX MSI CI 产物已验证；真实证书签名待补 | 基本完成 |
+| M2d | MSI/Authenticode/自动更新/回滚 | 自动更新/校验/回滚 + Inno + WiX MSI + tag 发布工作流；真实证书签名待补 | 基本完成 |
 | M2e | 性能/内存/CPU/8 小时 soak | ✅ 工具就绪：`scripts/bench-soak.ps1`（自动连接 + 采样 + 稳态回归 + 阈值）与 `--bench-frames`（本地呈现）、`tests/input_latency.rs`（输入→像素 P95）；已跑 2 分钟冒烟：空闲 CPU 0.88%、内存平稳 | 待真机 8h/4K60 |
 
 ## M2b：自适应控制器（本轮）
@@ -67,6 +67,7 @@
 - 更新前把当前 exe 备份到 `updates/rollback/`；失败或手动“回滚”可启动旧版本。
 - 静默安装：Inno `/SILENT /NORESTART /CLOSEAPPLICATIONS`，MSI `msiexec /qn`。
 - CI 产物：`RustVNC-Setup-0.1.0.exe` 与 `RustVNC.msi`（WiX 3.14，per-user）。
+- Tag 发布：`release.yml` 构建 EXE/MSI、生成 `update.json`、创建 GitHub Release。
 - UI：“检查更新 / 回滚”，更新窗口显示版本与说明。
 - `RUSTVNC_UPDATE_URL` 覆盖 manifest；开发可 `RUSTVNC_ALLOW_UNSIGNED_UPDATE=1` 跳过 Authenticode（默认不允许）。
 

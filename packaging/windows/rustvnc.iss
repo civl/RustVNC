@@ -1,7 +1,9 @@
 ; RustVNC M1b Windows installer (Inno Setup 6)
 ; Build with: powershell -ExecutionPolicy Bypass -File build.ps1
 #define MyAppName "RustVNC"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.1.0"
+#endif
 #define MyAppPublisher "RustVNC"
 #define MyAppExeName "rustvnc-client.exe"
 

@@ -19,7 +19,25 @@ packaging/windows/output/RustVNC.msi
 ```
 
 MSI 是 per-user WiX 工程（`Product.wxs`），安装到
-`%LOCALAPPDATA%\Programs\RustVNC`，不要求管理员权限。
+`%LOCALAPPDATA%\RustVNC`，不要求管理员权限。
+
+## 发布
+
+推 tag 即可触发 `.github/workflows/release.yml`：
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+工作流会构建 EXE、MSI，计算 EXE 的 SHA-256，生成 `update.json`，并创建
+GitHub Release（包含 macOS Agent zip）。客户端默认检查：
+
+```text
+https://github.com/civl/RustVNC/releases/latest/download/update.json
+```
+
+如果配置了 Windows 签名 secret，EXE/MSI 会先签名；否则会明确警告未签名。
 
 安装目录：`%LOCALAPPDATA%\Programs\RustVNC`。
 

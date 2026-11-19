@@ -286,51 +286,6 @@ fn original_path(state_dir: &Path) -> PathBuf {
     state_dir.join(ORIGINAL_FILE)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lists_at_least_the_current_mode() {
-        let display = CGDisplay::main();
-        let modes = all_modes(&display).expect("display modes");
-        assert!(!modes.is_empty());
-    }
-
-    #[test]
-    #[ignore = "changes the display mode; run manually"]
-    fn applies_1080p_and_restores() {
-        let display = CGDisplay::main();
-        let current = display.display_mode().expect("current mode");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let guard = DisplayGuard::new(dir.path().to_path_buf()).expect("guard");
-        let applied = guard.apply(1920, 1080).expect("apply 1080p");
-        assert_eq!((applied.width, applied.height), (1920, 1080));
-        drop(guard);
-        let restored = display.display_mode().expect("restored");
-        assert_eq!(restored.width(), current.width());
-        assert_eq!(restored.height(), current.height());
-    }
-
-    #[test]
-    #[ignore = "changes the display configuration; run manually on a real Mac"]
-    fn applies_the_current_mode_and_restores_it() {
-        let display = CGDisplay::main();
-        let current = display.display_mode().expect("current mode");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let guard = DisplayGuard::new(dir.path().to_path_buf()).expect("guard");
-        let applied = guard
-            .apply(current.width() as u16, current.height() as u16)
-            .expect("apply same mode");
-        assert_eq!(applied.width as u64, current.width());
-        assert_eq!(applied.height as u64, current.height());
-        drop(guard);
-        let restored = display.display_mode().expect("restored mode");
-        assert_eq!(restored.width(), current.width());
-        assert_eq!(restored.height(), current.height());
-    }
-}
-
 /// Mirrors every display onto the main one (single-screen mode) and restores the
 /// previous mirroring layout when dropped.
 ///
@@ -471,4 +426,49 @@ pub fn diagnose() -> String {
         Err(err) => out.push_str(&format!("active displays: ERROR {err:?}\n")),
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lists_at_least_the_current_mode() {
+        let display = CGDisplay::main();
+        let modes = all_modes(&display).expect("display modes");
+        assert!(!modes.is_empty());
+    }
+
+    #[test]
+    #[ignore = "changes the display mode; run manually"]
+    fn applies_1080p_and_restores() {
+        let display = CGDisplay::main();
+        let current = display.display_mode().expect("current mode");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let guard = DisplayGuard::new(dir.path().to_path_buf()).expect("guard");
+        let applied = guard.apply(1920, 1080).expect("apply 1080p");
+        assert_eq!((applied.width, applied.height), (1920, 1080));
+        drop(guard);
+        let restored = display.display_mode().expect("restored");
+        assert_eq!(restored.width(), current.width());
+        assert_eq!(restored.height(), current.height());
+    }
+
+    #[test]
+    #[ignore = "changes the display configuration; run manually on a real Mac"]
+    fn applies_the_current_mode_and_restores_it() {
+        let display = CGDisplay::main();
+        let current = display.display_mode().expect("current mode");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let guard = DisplayGuard::new(dir.path().to_path_buf()).expect("guard");
+        let applied = guard
+            .apply(current.width() as u16, current.height() as u16)
+            .expect("apply same mode");
+        assert_eq!(applied.width as u64, current.width());
+        assert_eq!(applied.height as u64, current.height());
+        drop(guard);
+        let restored = display.display_mode().expect("restored mode");
+        assert_eq!(restored.width(), current.width());
+        assert_eq!(restored.height(), current.height());
+    }
 }

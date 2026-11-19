@@ -41,6 +41,13 @@ pub struct UiState {
     /// Start hidden in the tray/menu bar instead of opening a window.
     #[serde(default)]
     pub start_minimized: Option<bool>,
+    /// Closing the window hides it to the tray instead of quitting.
+    #[serde(default)]
+    pub close_to_tray: Option<bool>,
+    /// Preferred renderer: `metal`, `dx12`, `vulkan`, `gl` or `glow`; absent is
+    /// the platform default chain.
+    #[serde(default)]
+    pub renderer: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -175,6 +182,8 @@ mod tests {
             lang: Some("en".into()),
             notifications: Some(false),
             start_minimized: Some(true),
+            close_to_tray: Some(true),
+            renderer: None,
         };
         state.save(&path).unwrap();
 

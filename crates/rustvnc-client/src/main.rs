@@ -49,6 +49,8 @@ struct StartupOptions {
     screenshot: Option<std::path::PathBuf>,
     /// Start sharing this Mac at launch (`--share`).
     share: bool,
+    /// Open the settings window at launch (`--settings`).
+    settings: bool,
 }
 
 fn startup_options() -> StartupOptions {
@@ -61,6 +63,7 @@ fn startup_options() -> StartupOptions {
             "--bench-out" => options.bench_out = args.next().map(std::path::PathBuf::from),
             "--screenshot" => options.screenshot = args.next().map(std::path::PathBuf::from),
             "--share" => options.share = true,
+            "--settings" => options.settings = true,
             _ => {}
         }
     }
@@ -90,16 +93,12 @@ enum RenderAttempt {
 /// has no surface support, and falling all the way to glow means the deprecated
 /// OpenGL path — which is what happened before Metal was listed first.
 #[cfg(target_os = "macos")]
-fn render_attempts() -> Vec<RenderAttempt> {
+fn render_attempts(preferred: Option<&str>) -> Vec<RenderAttempt> {
     let metal = RenderAttempt::Wgpu {
         backends: wgpu::Backends::METAL,
     };
     let glow = RenderAttempt::Glow;
-    match std::env::var("RUSTVNC_RENDERER")
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    match preferred.unwrap_or_default().to_ascii_lowercase().as_str() {
         "glow" => vec![glow],
         "metal" => vec![metal],
         _ => vec![metal, glow],
@@ -107,7 +106,7 @@ fn render_attempts() -> Vec<RenderAttempt> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn render_attempts() -> Vec<RenderAttempt> {
+fn render_attempts(preferred: Option<&str>) -> Vec<RenderAttempt> {
     let dx12 = RenderAttempt::Wgpu {
         backends: wgpu::Backends::DX12,
     };
@@ -119,11 +118,7 @@ fn render_attempts() -> Vec<RenderAttempt> {
     };
     let glow = RenderAttempt::Glow;
 
-    match std::env::var("RUSTVNC_RENDERER")
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    match preferred.unwrap_or_default().to_ascii_lowercase().as_str() {
         // Explicit pinning, for diagnostics.
         "glow" | "opengl-old" => vec![glow],
         "dx12" | "d3d12" => vec![dx12],
@@ -204,6 +199,12 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let startup = startup_options();
+    // Renderer preference from the settings window; `RUSTVNC_RENDERER` still wins
+    // so a broken GPU setup can be worked around without opening the UI.
+    let preferred_renderer = std::env::var("RUSTVNC_RENDERER").ok().or_else(|| {
+        let path = UiState::default_path();
+        UiState::load(&path).ok().and_then(|state| state.renderer)
+    });
     // Best-effort: the toast still appears without it, just without the app's
     // name and icon.
     notify::ensure_registered();
@@ -238,7 +239,7 @@ fn main() -> eframe::Result {
     let instance_handle = instance.handle();
 
     let mut last_error = Ok(());
-    for attempt in render_attempts() {
+    for attempt in render_attempts(preferred_renderer.as_deref()) {
         match run_native(attempt, startup.clone(), instance_handle.clone()) {
             Ok(()) => return Ok(()),
             Err(err) => {
@@ -362,6 +363,10 @@ struct App {
     screenshot_path: Option<std::path::PathBuf>,
     screenshot_requested: bool,
     screenshot_started: Instant,
+    /// Settings window and the preferences it edits.
+    show_settings: bool,
+    close_to_tray: bool,
+    renderer_choice: Option<String>,
     /// Sharing panel ("share this Mac"): the host half of the app.
     show_share: bool,
     share_allow_resolution: bool,
@@ -738,6 +743,9 @@ impl App {
             screenshot_path: startup.screenshot.clone(),
             screenshot_requested: false,
             screenshot_started: Instant::now(),
+            show_settings: startup.settings,
+            close_to_tray: ui_state.close_to_tray.unwrap_or(true),
+            renderer_choice: ui_state.renderer.clone(),
             show_share: startup.share,
             share_allow_resolution: true,
             share_code: None,
@@ -869,6 +877,8 @@ impl App {
         self.ui_state.lang = Some(self.lang.tag().to_string());
         self.ui_state.notifications = Some(self.notifier.enabled());
         self.ui_state.start_minimized = Some(self.start_minimized_setting);
+        self.ui_state.close_to_tray = Some(self.close_to_tray);
+        self.ui_state.renderer = self.renderer_choice.clone();
         if let Err(err) = self.ui_state.save(&self.ui_state_path) {
             tracing::warn!("save {}: {err:#}", self.ui_state_path.display());
         }
@@ -2197,6 +2207,116 @@ impl App {
 
     /// The host half of the app: start/stop the bundled agent, show the code the
     /// other side types in, and say what still needs a system permission.
+    /// One place for the switches that used to be command-line flags or scattered
+    /// through the connection form: startup, tray behaviour, notifications and the
+    /// renderer. Everything here persists immediately.
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let lang = self.lang;
+        let mut open = self.show_settings;
+        egui::Window::new(lang.t("设置", "Settings"))
+            .open(&mut open)
+            .default_width(460.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.heading(lang.t("启动", "Startup"));
+                let mut autostart = self.autostart_enabled;
+                if ui
+                    .checkbox(&mut autostart, lang.t("登录时自动启动", "Launch at login"))
+                    .changed()
+                {
+                    self.set_autostart(autostart);
+                }
+                let mut minimized = self.start_minimized_setting;
+                if ui
+                    .checkbox(
+                        &mut minimized,
+                        lang.t(
+                            "启动时不弹窗，只驻留托盘/菜单栏",
+                            "Start in the tray / menu bar without a window",
+                        ),
+                    )
+                    .changed()
+                {
+                    self.start_minimized_setting = minimized;
+                    self.persist_ui();
+                }
+
+                ui.add_space(10.0);
+                ui.heading(lang.t("窗口", "Window"));
+                let mut close_to_tray = self.close_to_tray;
+                if ui
+                    .checkbox(
+                        &mut close_to_tray,
+                        lang.t(
+                            "关闭窗口时隐藏到托盘（取消则关闭即退出）",
+                            "Closing the window hides it to the tray (off quits)",
+                        ),
+                    )
+                    .changed()
+                {
+                    self.close_to_tray = close_to_tray;
+                    self.persist_ui();
+                }
+                let mut notifications = self.notifier.enabled();
+                if ui
+                    .checkbox(
+                        &mut notifications,
+                        lang.t(
+                            "断线/重连/新版本时提醒（窗口在前台时不弹）",
+                            "On disconnect, reconnect and updates (only when backgrounded)",
+                        ),
+                    )
+                    .changed()
+                {
+                    self.notifier.set_enabled(notifications);
+                    self.persist_ui();
+                }
+
+                ui.add_space(10.0);
+                ui.heading(lang.t("渲染", "Rendering"));
+                ui.horizontal(|ui| {
+                    let label = self
+                        .renderer_choice
+                        .clone()
+                        .unwrap_or_else(|| lang.t("自动", "Automatic").to_string());
+                    egui::ComboBox::from_id_salt("renderer")
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            let options = [
+                                (None, "自动 / Automatic"),
+                                (Some("metal"), "Metal"),
+                                (Some("dx12"), "Direct3D 12"),
+                                (Some("vulkan"), "Vulkan"),
+                                (Some("gl"), "OpenGL (wgpu)"),
+                                (Some("glow"), "glow"),
+                            ];
+                            for (value, text) in options {
+                                let selected = self.renderer_choice.as_deref() == value;
+                                if ui.selectable_label(selected, text).clicked() {
+                                    self.renderer_choice = value.map(str::to_string);
+                                    self.persist_ui();
+                                }
+                            }
+                        });
+                    if ui
+                        .button(lang.t("打开日志目录", "Open log folder"))
+                        .clicked()
+                    {
+                        let _ = rustvnc_client::diag::open_log_dir();
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(lang.t(
+                        "渲染后端下次启动生效；环境变量 RUSTVNC_RENDERER 优先级更高。",
+                        "The renderer applies on the next launch; RUSTVNC_RENDERER overrides it.",
+                    ))
+                    .small()
+                    .weak(),
+                );
+            });
+        self.show_settings = open;
+    }
+
     fn share_window(&mut self, ctx: &egui::Context) {
         let lang = self.lang;
         if self.share_checked.elapsed() > Duration::from_secs(1) {
@@ -2515,32 +2635,6 @@ impl App {
                 );
                 ui.end_row();
 
-                ui.label(lang.t("开机自启", "Launch at login"));
-                let mut autostart = self.autostart_enabled;
-                if ui
-                    .checkbox(&mut autostart, lang.t("登录时自动启动", "Launch at login"))
-                    .changed()
-                {
-                    self.set_autostart(autostart);
-                }
-                ui.end_row();
-
-                ui.label(lang.t("启动", "Startup"));
-                let mut start_minimized = self.start_minimized_setting;
-                if ui
-                    .checkbox(
-                        &mut start_minimized,
-                        lang.t(
-                            "启动时不弹窗，只驻留托盘/菜单栏",
-                            "Start in the tray / menu bar without a window",
-                        ),
-                    )
-                    .changed()
-                {
-                    self.start_minimized_setting = start_minimized;
-                    self.persist_ui();
-                }
-                ui.end_row();
 
                 ui.label(lang.t("系统通知", "Notifications"));
                 let mut notifications = self.notifier.enabled();
@@ -3516,6 +3610,7 @@ impl eframe::App for App {
         if ctx.input(|input| input.viewport().close_requested())
             && !self.quitting
             && self._tray.is_some()
+            && self.close_to_tray
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -3552,6 +3647,9 @@ impl eframe::App for App {
                     ui.separator();
                     ui.label(&self.status);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("⚙").on_hover_text("设置 / Settings").clicked() {
+                            self.show_settings = !self.show_settings;
+                        }
                         let keyboard = keyboard_icon(ui, self.lang);
                         if keyboard.clicked() {
                             self.show_keymap = !self.show_keymap;
@@ -3665,6 +3763,9 @@ impl eframe::App for App {
         }
         if self.show_region {
             self.region_window(ctx);
+        }
+        if self.show_settings {
+            self.settings_window(ctx);
         }
         if self.show_share {
             self.share_window(ctx);
@@ -4349,7 +4450,7 @@ mod renderer_tests {
     fn the_renderer_chain_prefers_d3d12_and_can_be_pinned() {
         // SAFETY: this is the only test that touches `RUSTVNC_RENDERER`.
         unsafe { std::env::remove_var("RUSTVNC_RENDERER") };
-        let chain = chain_of(&render_attempts());
+        let chain = chain_of(&render_attempts(None));
         assert!(
             chain[0].contains("DX12"),
             "first attempt must be D3D12: {chain:?}"
@@ -4369,7 +4470,7 @@ mod renderer_tests {
         ] {
             // SAFETY: sequential within this test.
             unsafe { std::env::set_var("RUSTVNC_RENDERER", value) };
-            let pinned = chain_of(&render_attempts());
+            let pinned = chain_of(&render_attempts(Some(value)));
             assert_eq!(
                 pinned.len(),
                 1,

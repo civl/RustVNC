@@ -133,6 +133,20 @@ packaging/windows/          # Inno Setup、WiX MSI、签名与更新 manifest �
 - [卡点分析与修复计划](BLOCKER-ANALYSIS.md) · [真机验收清单](ACCEPTANCE.md)
 - Agent 侧分册：[A0 骨架](README-A0.md) · [A1 控制面](README-A1.md) · [A2 菜单栏与剪贴板](README-A2.md) · [A2b 音频](README-A2B.md)
 
+## 设置与命令行开关
+
+界面右上角 ⚙ 里集中了这些开关（改动立即持久化到 `ui.json`）：
+
+| 设置项 | 等价命令行 | 说明 |
+|---|---|---|
+| 登录时自动启动 | — | 安装版（`/Applications`、`Program Files`）首次运行自动注册 |
+| 启动时不弹窗 | `--minimized` | 反之 `--show` 强制显示 |
+| 关闭窗口时隐藏到托盘 | — | 取消勾选则关窗即退出 |
+| 断线/重连/新版本提醒 | — | 窗口在前台时不打扰 |
+| 渲染后端 | `RUSTVNC_RENDERER` | 设置下次启动生效；环境变量优先级更高 |
+
+`--connect`、`--share`、`--settings`、`--screenshot`、`--bench-frames` 仍只作为自动化入口保留，不占界面。
+
 ## 自动化环境变量
 
 无头或脚本化运行（soak、基准、验收）不必手工输入凭据：

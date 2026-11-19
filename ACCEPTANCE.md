@@ -189,6 +189,19 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 >
 > 客户端侧同样改为"能力到了再发请求"：缺能力时状态栏直接提示
 > “Mac 菜单栏未开启‘允许远程调整分辨率’”，不会发出注定失败的请求。
+
+> **2026-11-19 安装版复测（`/Applications/RustVNC.app`，由 App 自己拉起被控端）**
+>
+> ```text
+> capabilities = 0x6                                  # 菜单开关为开
+> 会话中：两块屏 Mirror: On，framebuffer 8960x2880 → 5120x2880（53.8 fps）
+> 会话结束：Mirror: Off，虚拟屏回 3840x2160，framebuffer 回 8960x2880
+> 被控端进程：/Applications/RustVNC.app/Contents/MacOS/rustvnc-agent --serve … --allow-resolution
+> ```
+>
+> 说明：镜像生效的前提是屏幕录制权限授予**当前**这个 App 构建；本次授权后不再重建，
+> 因而可重复验证。`--share`（启动参数自动开启共享）在 GUI 下未生效，属于已知缺陷，
+> 手动点"开始共享"正常。
 ## 5. 分辨率变化
 
 在 Mac 上改分辨率或插拔外接屏。

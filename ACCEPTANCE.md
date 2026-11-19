@@ -140,7 +140,7 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 - [x] 2560×1440 切换成功并恢复（2026-11-19 实测）
 - [x] 强制退出客户端后仍恢复（Agent 监听 `connection.closed()`）
 - [x] Agent 崩溃后重新启动，残留模式被恢复（`restore_saved`）
-- [ ] 菜单关闭时请求被明确拒绝（代码路径已实现，未单独实测）
+- [x] 菜单关闭时请求被明确拒绝（见下：能力位不再声明 + 文案指明开关位置）
 - [x] 单屏镜像（`SetDisplayLayout`）：2026-11-19 实测通过（见下）
 
 > **2026-11-19 真机实测（Mac mini M4 / macOS 27.2.1 / arm64）**
@@ -175,6 +175,20 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 > 前提：**屏幕录制权限必须授予"当前"这个 App 构建**。ad-hoc 签名每次重建都会变，
 > 授权会随之失效——上一轮 `applied=false` 的报错就是这个原因，不是 API 限制。
 > 用 `--diagnose-displays` 可确认 `permission: true` 与 `active displays: 2`。
+
+> **2026-11-19 关闭态实测**
+>
+> ```text
+> 未加 --allow-resolution 启动：
+>   capabilities = 0x0            # 不再声明 CAP_DISPLAY / CAP_LAYOUT
+>   分辨率请求：applied=false: 远程分辨率控制已关闭：请在 Mac 菜单栏 RustVNC 图标里打开“允许远程调整分辨率”
+>   单屏请求：  applied=false: 显示器布局控制已关闭：请在 Mac 菜单栏 RustVNC 图标里打开“允许远程调整分辨率”
+> 加 --allow-resolution 启动：
+>   capabilities = 0x6            # 恢复声明
+> ```
+>
+> 客户端侧同样改为"能力到了再发请求"：缺能力时状态栏直接提示
+> “Mac 菜单栏未开启‘允许远程调整分辨率’”，不会发出注定失败的请求。
 ## 5. 分辨率变化
 
 在 Mac 上改分辨率或插拔外接屏。

@@ -24,7 +24,7 @@ pub mod session;
 pub mod state;
 pub mod tls;
 
-pub use protocol::{CAP_AUDIO, CAP_DISPLAY, ControlMsg, PROTO_VERSION};
+pub use protocol::{CAP_AUDIO, CAP_DISPLAY, CAP_LAYOUT, ControlMsg, PROTO_VERSION};
 pub use session::{
     AgentCommand, AgentEvent, AgentSession, PairConfig, PairOutcome, SessionConfig, pair,
 };

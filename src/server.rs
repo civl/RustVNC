@@ -375,9 +375,14 @@ async fn handle_connection(
                 }
             }
 
-            capabilities |= protocol::CAP_DISPLAY;
-            // Single-screen (mirroring) control rides on the same menu-bar gate.
-            capabilities |= protocol::CAP_LAYOUT;
+            // Only advertise what the menu-bar switch actually allows: promising
+            // the capability and then rejecting every request is worse than not
+            // offering it at all.
+            if session_options.allow_resolution.load(Ordering::Relaxed) {
+                capabilities |= protocol::CAP_DISPLAY;
+                // Single-screen (mirroring) control rides on the same gate.
+                capabilities |= protocol::CAP_LAYOUT;
+            }
             protocol::write_msg(
                 &mut send,
                 &ControlMsg::ServerHello {
@@ -460,7 +465,7 @@ async fn handle_connection(
                                     protocol::ControlMsg::DisplayLayoutResult {
                                         single,
                                         applied: false,
-                                        message: "显示器布局控制已在 Mac 菜单栏关闭".to_string(),
+                                        message: "显示器布局控制已关闭：请在 Mac 菜单栏 RustVNC 图标里打开“允许远程调整分辨率”".to_string(),
                                     }
                                 } else if single {
                                     match display::MirrorGuard::apply(true) {
@@ -501,7 +506,7 @@ async fn handle_connection(
                             }                            Some(ControlMsg::SetDisplayMode { width, height }) => {
                                 let result = if !session_options.allow_resolution.load(Ordering::Relaxed) {
                                     Err(anyhow::anyhow!(
-                                        "远程分辨率控制已在 Mac 菜单栏关闭"
+                                        "远程分辨率控制已关闭：请在 Mac 菜单栏 RustVNC 图标里打开“允许远程调整分辨率”"
                                     ))
                                 } else {
                                     if display.is_none() {

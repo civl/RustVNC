@@ -434,6 +434,8 @@ struct App {
     agent: Option<AgentSession>,
     agent_status: String,
     pending_resolution: Option<(u16, u16)>,
+    /// Single-screen request waiting for the capability list.
+    pending_layout: Option<bool>,
     agent_pair_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// Floating key-mapping editor.
     show_keymap: bool,
@@ -777,6 +779,7 @@ impl App {
             agent: None,
             agent_status: String::new(),
             pending_resolution: None,
+            pending_layout: None,
             agent_pair_rx: None,
             show_keymap: false,
             show_region: false,
@@ -1544,7 +1547,8 @@ impl App {
         }) {
             Ok(session) => {
                 self.agent_status = "连接 Agent…".to_string();
-                session.set_display_layout(self.draft.config.single_display);
+                // Sent once the agent reports whether layout control is on.
+                self.pending_layout = Some(self.draft.config.single_display);
                 if let Some((width, height)) = self.pending_resolution {
                     session.set_display_mode(width, height);
                     self.agent_status = format!("连接 Agent…（请求分辨率 {width}×{height}）");
@@ -1602,7 +1606,25 @@ impl App {
                             self.agent_status
                                 .push_str(&format!(" · 请求分辨率 {width}×{height}"));
                         } else {
-                            self.agent_status.push_str(" · Agent 不支持分辨率控制");
+                            self.agent_status
+                                .push_str(" · Mac 菜单栏未开启“允许远程调整分辨率”");
+                        }
+                    }
+                    // Same for single-screen: only ask when the Mac side allows it,
+                    // so the UI never fires a request it already knows is refused.
+                    if let Some(single) = self.pending_layout.take() {
+                        if capabilities & rustvnc_agent_client::CAP_LAYOUT != 0 {
+                            if let Some(session) = &self.agent {
+                                session.set_display_layout(single);
+                            }
+                            self.agent_status.push_str(if single {
+                                " · 已请求单屏"
+                            } else {
+                                " · 已请求多屏"
+                            });
+                        } else if single {
+                            self.agent_status
+                                .push_str(" · Mac 菜单栏未开启“允许远程调整分辨率”");
                         }
                     }
                 }

@@ -2,3 +2,6 @@
 /dist/
 .DS_Store
 *.log
+# Installer artefacts (built by CI or locally)
+packaging/windows/output/
+packaging/windows/stage/

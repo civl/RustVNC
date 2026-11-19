@@ -13,10 +13,36 @@ pub(crate) const MAX_PIXELS: usize = 8192 * 4320;
 pub(crate) const MAX_DIMENSION: u16 = 16384;
 pub(crate) const MAX_COMPRESSED: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_TEXT: usize = 1024 * 1024;
-/// Apple pseudo-encoding bodies are tiny metadata blobs; anything larger is a
-/// desynchronised stream, not a capability list.
-pub(crate) const MAX_PSEUDO_PAYLOAD: usize = 64 * 1024;
+/// Apple pseudo-encoding bodies are tiny metadata blobs (the three observed on
+/// a real Mac — 1107/1109/1110 — are 20, 31 and 45 bytes), so anything in the
+/// kilobytes is a desynchronised stream, not a capability list.
+///
+/// The wire length is a `u16`, i.e. at most 65535; this cap must therefore stay
+/// below that or the check below it can never fire.
+pub(crate) const MAX_PSEUDO_PAYLOAD: usize = 16 * 1024;
+/// Total Apple pseudo-encoding body bytes accepted in one `FramebufferUpdate`.
+///
+/// A batch advertises its rectangle count as a `u16`, and each Apple rectangle
+/// carries its own `u16` length prefix, so per-message caps alone still allow
+/// 65535 × 16 KiB of metadata from a single message. Real updates carry at most
+/// a handful of bodies; 1 MiB leaves two orders of magnitude of headroom.
+pub(crate) const MAX_PSEUDO_BUDGET: usize = 1024 * 1024;
 pub(crate) const MAX_NAME: usize = 4096;
+
+/// Largest compressed payload a rectangle may announce, given the pixel bytes
+/// it has to expand to.
+///
+/// Every compressed encoding here (`zlib`, `ZRLE`, `TRLE`) is a zlib stream
+/// whose worst-case expansion is a few bytes per 64 KiB block, far below the
+/// 12.5 % + 64 B headroom allowed here, so a legitimate stream always fits.
+/// Without this bound a 1×1 rectangle could announce `MAX_COMPRESSED`
+/// (64 MiB) and force that allocation before a single payload byte arrives.
+pub(crate) fn max_compressed_for(expected: usize) -> usize {
+    expected
+        .saturating_add(expected / 8)
+        .saturating_add(64)
+        .min(MAX_COMPRESSED)
+}
 
 pub(crate) fn dimensions(width: u16, height: u16) -> Result<(), VncError> {
     let pixels = u64::from(width) * u64::from(height);
@@ -93,6 +119,30 @@ mod tests {
             }
             other => panic!("expected FramebufferTooLarge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pseudo_payload_cap_can_actually_fire() {
+        // Read through `black_box` so the assertion is checked at run time
+        // rather than being folded into a lint-visible constant.
+        let payload = std::hint::black_box(MAX_PSEUDO_PAYLOAD);
+        let budget = std::hint::black_box(MAX_PSEUDO_BUDGET);
+        // The length comes off the wire as a u16, so a cap at or above 65536
+        // would make the decoder's check unreachable — the bug this constant
+        // used to have.
+        assert!(payload < usize::from(u16::MAX), "the cap must be reachable");
+        assert!(payload >= 64, "must fit every observed Apple body");
+        assert!(budget >= payload, "a batch may always carry one body");
+    }
+
+    #[test]
+    fn compressed_bound_follows_the_expected_pixels() {
+        // A 1x1 rectangle at 32 bpp may announce a few dozen bytes, not 64 MiB.
+        assert_eq!(max_compressed_for(4), 68);
+        // Larger rectangles get proportional slack, never more than the global cap.
+        assert_eq!(max_compressed_for(1 << 20), (1 << 20) + (1 << 17) + 64);
+        assert_eq!(max_compressed_for(usize::MAX), MAX_COMPRESSED);
+        assert_eq!(max_compressed_for(0), 64, "never a zero allowance");
     }
 
     #[test]

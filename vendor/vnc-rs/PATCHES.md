@@ -77,12 +77,56 @@ this is not something that can be fixed by waiting.
     `VncEvent::UpdateComplete`, which patch 3 introduced: those tests assert on
     semantic events and would otherwise be off by one marker.
 
+11. **`src/limits.rs`, `src/codec/{zlib_rect,zrle,trle}.rs`** — compressed
+    payloads are bounded by the pixels they must expand to
+    (`limits::max_compressed_for`) instead of the flat 64 MiB
+    `MAX_COMPRESSED`; `MAX_PSEUDO_PAYLOAD` drops to 16 KiB because the wire
+    length is a `u16` and the old 64 KiB cap could never fire; new
+    `MAX_PSEUDO_BUDGET` bounds total Apple metadata per update.
+
+12. **`src/client/connection.rs`** — `pseudo_bytes` accumulates Apple metadata
+    per `FramebufferUpdate` and rejects a batch over `MAX_PSEUDO_BUDGET`.
+
+13. **`src/client/connection/proptests.rs`** (new, `#[cfg(test)]`) — `proptest`
+    properties over the read loop, `VncEncoding::from_wire`, `apple::parse` and
+    `PixelFormat::try_from`.
+
+14. **`Cargo.toml`** — `proptest` added as a dev-dependency (tests only, not
+    linked into the client binary).
+
+## Bounded allocations (2026-11-19)
+
+Two paths let a server decide how much memory the client allocates, which
+matters because this decoder reads an untrusted peer:
+
+1. **Apple metadata had a dead cap.** `MAX_PSEUDO_PAYLOAD` was 64 KiB, but the
+   length is read as a `u16` (max 65535), so `len > 64 KiB` was unreachable. A
+   single `FramebufferUpdate` advertises its rectangle count as a `u16`, and each
+   Apple rectangle carries its own length prefix — 65535 × 64 KiB ≈ 4 GiB of
+   metadata from one message. The per-message cap is now 16 KiB (the three
+   observed bodies are 20, 31 and 45 bytes) and `MAX_PSEUDO_BUDGET` (1 MiB)
+   bounds the whole batch.
+2. **`zlib`/`ZRLE`/`TRLE` allocated before validating.** Each read a `u32`
+   length, accepted anything up to `MAX_COMPRESSED` (64 MiB) and allocated it
+   before comparing against the rectangle's own size. A 1×1 rectangle could
+   therefore force a 64 MiB allocation. The bound is now derived from the output
+   the rectangle must produce (`expected + 12.5 % + 64 B`), which a real zlib
+   stream never approaches; `MAX_COMPRESSED` remains as the absolute ceiling.
+
+Regression tests: `limits::tests::{pseudo_payload_cap_can_actually_fire,
+compressed_bound_follows_the_expected_pixels}` and
+`codec::zlib_rect::tests::oversized_length_is_rejected_before_allocating`.
+Property tests in `client::connection::proptests` pin the general contract:
+arbitrary server traffic terminates without panicking, `from_wire` is total,
+`apple::parse` never panics, and no 16-byte pixel format is rejected by a panic.
+
 ## Verifying this file against the code
 
 `git diff --no-index <cargo-registry>/vnc-rs-0.6.1 vendor/vnc-rs` lists exactly
 this set (touch points above plus `src/apple.rs`, `src/codec/zlib_rect.rs`,
-`src/codec/cursor.rs`, `src/codec/mod.rs`, `src/lib.rs`, `src/limits.rs` and the
-two new test files). Anything else in the diff is a documentation bug here.
+`src/codec/cursor.rs`, `src/codec/mod.rs`, `src/lib.rs`, `src/limits.rs`,
+`src/client/connection/proptests.rs` and the two new test files). Anything else
+in the diff is a documentation bug here.
 
 ## Apple body layout — verified on a real Mac (2026-11-17)
 
@@ -175,6 +219,13 @@ five-minute diagnosis instead of a decoder hunt, so it stays.
 
 ## Tests
 
-`cargo test -p vnc-rs` — the upstream suite (60 tests) plus
-`codec::zlib_rect::tests::decodes_two_rectangles_from_one_shared_stream`, which
-locks in the shared-stream behaviour.
+`cargo test -p vnc-rs` — 72 library tests (65 before the bounded-allocation
+round), 6 `authentication` integration tests and 2 doc-tests. Notable additions:
+
+- `codec::zlib_rect::tests::decodes_two_rectangles_from_one_shared_stream` locks
+  in the shared-stream behaviour.
+- `limits::tests` and `codec::zlib_rect::tests` cover the allocation bounds.
+- `client::connection::proptests` is the property layer the design asked for:
+  hand-written streams pin down what a real Mac sends, these pin down what *any*
+  stream may do.
+

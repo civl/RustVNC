@@ -77,14 +77,17 @@ impl Decoder {
     {
         crate::limits::dimensions(rect.width, rect.height)?;
         format.validate()?;
+        let bpp = format.bits_per_pixel as usize / 8;
+        let expected = bpp * rect.width as usize * rect.height as usize;
         let data_len = input.read_u32().await? as usize;
-        if data_len > crate::limits::MAX_COMPRESSED {
+        // Bound the allocation by the pixels this rectangle expands to; see
+        // `limits::max_compressed_for` (same reasoning as the zlib decoder).
+        if data_len == 0 || data_len > crate::limits::max_compressed_for(expected) {
             return Err(VncError::InvalidImageData);
         }
         let mut zlib_data = initialized_vec(data_len);
         input.read_exact(&mut zlib_data).await?;
 
-        let bpp = format.bits_per_pixel as usize / 8;
         let pixel_mask = if format.true_color_flag != 0 {
             ((format.red_max as u32) << format.red_shift)
                 | ((format.green_max as u32) << format.green_shift)

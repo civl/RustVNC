@@ -515,6 +515,10 @@ where
             ServerMsg::FramebufferUpdate(rect_num) => {
                 let mut updates = crate::desktop::UpdateBatch::default();
                 let mut framebuffer_changed = false;
+                // Cumulative Apple metadata bytes for this one update; see the
+                // pseudo-encoding arm below for why a per-message cap is not
+                // enough.
+                let mut pseudo_bytes = 0usize;
                 for _ in 0..rect_num {
                     let rect = ImageRect::read(stream).await?;
                     // Diagnostic: which encoding arrives, and with what geometry.
@@ -648,6 +652,14 @@ where
                             if len > crate::limits::MAX_PSEUDO_PAYLOAD {
                                 return Err(VncError::InvalidImageData);
                             }
+                            // One update may advertise up to 65535 rectangles and
+                            // every Apple rectangle carries its own length prefix,
+                            // so the per-message cap alone still permits gigabytes
+                            // of metadata from a single message.
+                            pseudo_bytes = pseudo_bytes.saturating_add(len);
+                            if pseudo_bytes > crate::limits::MAX_PSEUDO_BUDGET {
+                                return Err(VncError::InvalidImageData);
+                            }
                             let mut body = vec![0u8; len];
                             stream.read_exact(&mut body).await?;
                             output_func(VncEvent::AppleEncoding {
@@ -742,3 +754,6 @@ mod resize_tests;
 
 #[cfg(test)]
 mod layout_order_tests;
+
+#[cfg(test)]
+mod proptests;

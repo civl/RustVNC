@@ -43,7 +43,11 @@ impl Decoder {
         let expected = bytes_per_pixel as usize * rect.width as usize * rect.height as usize;
 
         let compressed_len = input.read_u32().await? as usize;
-        if compressed_len == 0 || compressed_len > crate::limits::MAX_COMPRESSED {
+        // Bound the allocation by the pixels this rectangle must expand to. The
+        // stream cannot be much bigger than its output, so a small rectangle can
+        // no longer announce MAX_COMPRESSED (64 MiB) and force that allocation
+        // before its payload has even been read.
+        if compressed_len == 0 || compressed_len > crate::limits::max_compressed_for(expected) {
             return Err(VncError::InvalidImageData);
         }
         let mut compressed = initialized_vec(compressed_len);
@@ -98,6 +102,43 @@ mod tests {
             width: 2,
             height: 2,
         }
+    }
+
+    #[test]
+    fn oversized_length_is_rejected_before_allocating() {
+        // A 1x1 rectangle at 32 bpp expands to 4 bytes; announcing a 64 MiB
+        // payload is a memory-amplification attempt. It must be refused on the
+        // length alone — no payload bytes are supplied, so a decoder that tried
+        // to read them would block instead of failing.
+        let format = PixelFormat::bgra();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(64u32 * 1024 * 1024).to_be_bytes());
+        let mut input: &[u8] = &payload;
+        let mut decoder = Decoder::new();
+        let events = std::cell::RefCell::new(Vec::new());
+        let output = |event: VncEvent| {
+            events.borrow_mut().push(event);
+            async { Ok(()) }
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(decoder.decode(
+            &format,
+            &Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            &mut input,
+            &output,
+        ));
+        assert!(
+            matches!(result, Err(VncError::InvalidImageData)),
+            "expected a length rejection, got {result:?}"
+        );
+        assert!(events.borrow().is_empty(), "nothing may be emitted");
     }
 
     #[test]

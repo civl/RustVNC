@@ -51,6 +51,8 @@ struct StartupOptions {
     share: bool,
     /// Open the settings window at launch (`--settings`).
     settings: bool,
+    /// Open the connection form at launch instead of the landing screen (`--form`).
+    form: bool,
 }
 
 fn startup_options() -> StartupOptions {
@@ -64,6 +66,7 @@ fn startup_options() -> StartupOptions {
             "--screenshot" => options.screenshot = args.next().map(std::path::PathBuf::from),
             "--share" => options.share = true,
             "--settings" => options.settings = true,
+            "--form" => options.form = true,
             _ => {}
         }
     }
@@ -348,7 +351,6 @@ struct App {
     status: String,
     stats: String,
     error: Option<String>,
-    search: String,
     last_pointer: Option<(u16, u16, u8)>,
     last_texture_size: (usize, usize),
     clipboard_sync: bool,
@@ -724,7 +726,6 @@ impl App {
             status: "Ready".to_string(),
             stats: String::new(),
             error,
-            search: String::new(),
             last_pointer: None,
             last_texture_size: (0, 0),
             clipboard_sync: true,
@@ -754,7 +755,7 @@ impl App {
             share_error: None,
             share_checked: Instant::now(),
             share_started: false,
-            show_home: true,
+            show_home: !startup.form,
             pending_connect: startup.connect.clone(),
             bench: startup.bench_seconds.map(|seconds| {
                 let now = Instant::now();
@@ -2304,6 +2305,25 @@ impl App {
                     {
                         let _ = rustvnc_client::diag::open_log_dir();
                     }
+                    if ui.button(lang.t("检查更新", "Check updates")).clicked() {
+                        self.check_updates();
+                    }
+                    if ui.button(lang.t("回滚", "Rollback")).clicked() {
+                        match update::rollback_installer() {
+                            Some(path) => match std::process::Command::new(&path).spawn() {
+                                Ok(_) => {
+                                    self.quitting = true;
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                }
+                                Err(err) => self.error = Some(format!("rollback: {err}")),
+                            },
+                            None => {
+                                self.update_status = lang
+                                    .t("没有可回滚的版本", "Nothing to roll back")
+                                    .to_string()
+                            }
+                        }
+                    }
                 });
                 ui.label(
                     egui::RichText::new(lang.t(
@@ -2582,6 +2602,9 @@ impl App {
 
     fn form_ui(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
+        let ctx = ui.ctx().clone();
+        self.profile_bar(ui, &ctx);
+        ui.separator();
         ui.heading(lang.t("连接", "Connection"));
         if self.profiles.profiles().is_empty() {
             egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -2689,23 +2712,6 @@ impl App {
                 );
                 ui.end_row();
 
-
-                ui.label(lang.t("系统通知", "Notifications"));
-                let mut notifications = self.notifier.enabled();
-                if ui
-                    .checkbox(
-                        &mut notifications,
-                        lang.t(
-                            "断线/重连/新版本时提醒（窗口在前台时不弹）",
-                            "On disconnect, reconnect and updates (only when backgrounded)",
-                        ),
-                    )
-                    .changed()
-                {
-                    self.notifier.set_enabled(notifications);
-                    self.persist_ui();
-                }
-                ui.end_row();
 
                 ui.label(lang.t("远端分辨率", "Remote resolution"));
                 egui::ComboBox::from_id_salt("resolution")
@@ -3408,104 +3414,64 @@ impl App {
         }
     }
 
-    fn left_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    /// Compact strip above the connection form: pick / create / delete a profile,
+    /// import or export the list. This replaces the former left-hand panel — the
+    /// profile list is bookkeeping, not something that needs a third of the window.
+    fn profile_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let lang = self.lang;
-        ui.heading("RustVNC");
-        ui.label(lang.t("macOS 远程桌面", "macOS remote desktop"));
-        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.search);
-        });
-        ui.add_space(4.0);
-
-        let mut select = None;
-        egui::ScrollArea::vertical()
-            .max_height(420.0)
-            .show(ui, |ui| {
-                let query = self.search.clone();
-                let profiles = self
-                    .profiles
-                    .search(&query)
-                    .into_iter()
-                    .map(|profile| {
-                        (
-                            profile.id.clone(),
-                            profile.name.clone(),
-                            profile.config.host.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                for (id, name, host) in profiles {
-                    let selected = self.selected_id.as_deref() == Some(id.as_str());
-                    let label = format!("{name}\n{host}");
-                    if ui.selectable_label(selected, label).clicked() {
-                        select = Some(id);
+            let current = self
+                .selected_id
+                .as_deref()
+                .and_then(|id| self.profiles.get(id))
+                .map(|profile| profile.name.clone())
+                .unwrap_or_else(|| lang.t("选择配置", "Select profile").to_string());
+            let mut select = None;
+            egui::ComboBox::from_id_salt("profile-bar")
+                .selected_text(current)
+                .width(210.0)
+                .show_ui(ui, |ui| {
+                    let list: Vec<(String, String, String)> = self
+                        .profiles
+                        .profiles()
+                        .iter()
+                        .map(|profile| {
+                            (
+                                profile.id.clone(),
+                                profile.name.clone(),
+                                profile.config.host.clone(),
+                            )
+                        })
+                        .collect();
+                    for (id, name, host) in list {
+                        let selected = self.selected_id.as_deref() == Some(id.as_str());
+                        if ui
+                            .selectable_label(selected, format!("{name}  {host}"))
+                            .clicked()
+                        {
+                            select = Some(id);
+                        }
                     }
-                }
-            });
-        if let Some(id) = select {
-            self.select_profile(&id);
-        }
-
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
+                });
+            if let Some(id) = select {
+                self.select_profile(&id);
+            }
             if ui.button(lang.t("新建", "New")).clicked() {
                 self.new_profile();
             }
             if ui.button(lang.t("删除", "Delete")).clicked() {
                 self.delete_profile();
             }
-        });
-        ui.horizontal(|ui| {
-            if ui.button(lang.t("导出到剪贴板", "Export")).clicked() {
+            if ui.button(lang.t("导出", "Export")).clicked() {
                 match self.profiles.export() {
                     Ok(json) => {
                         ctx.copy_text(json);
-                        self.status = "Profiles copied to clipboard".to_string();
+                        self.status = lang.t("配置已复制到剪贴板", "Profiles copied").to_string();
                     }
                     Err(err) => self.error = Some(format!("export: {err:#}")),
                 }
             }
-            if ui.button(lang.t("打开日志", "Open logs")).clicked()
-                && let Err(err) = rustvnc_client::diag::open_log_dir()
-            {
-                self.error = Some(format!("open logs: {err:#}"));
-            }
-            if ui.button(lang.t("检查更新", "Check updates")).clicked() {
-                self.check_updates();
-            }
-            if ui.button(lang.t("回滚", "Rollback")).clicked() {
-                if let Some(path) = update::rollback_installer() {
-                    match std::process::Command::new(&path).spawn() {
-                        Ok(_) => {
-                            self.quitting = true;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        Err(err) => self.error = Some(format!("rollback: {err}")),
-                    }
-                } else {
-                    self.update_status = "没有可回滚的版本".to_string();
-                }
-            }
-            if ui.button(lang.t("导出诊断", "Diagnostics")).clicked() {
-                let mut summary = String::new();
-                summary.push_str(&format!("status: {}\nstats: {}\n", self.status, self.stats));
-                summary.push_str("profiles (host/name only):\n");
-                for profile in self.profiles.profiles() {
-                    summary.push_str(&format!(
-                        "- {}  {}:{}  auth={:?}\n",
-                        profile.name, profile.config.host, profile.config.port, profile.config.auth
-                    ));
-                }
-                match rustvnc_client::diag::write_bundle(&summary) {
-                    Ok(path) => {
-                        self.status = format!("Diagnostics: {}", path.display());
-                        let _ = rustvnc_client::diag::open_log_dir();
-                    }
-                    Err(err) => self.error = Some(format!("diagnostics: {err:#}")),
-                }
-            }
-            if ui.button(lang.t("从剪贴板导入", "Import")).clicked() {
+            if ui.button(lang.t("导入", "Import")).clicked() {
                 match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
                     Ok(json) => match self.profiles.import(&json) {
                         Ok(count) => self.status = format!("Imported {count} profiles"),
@@ -3515,16 +3481,7 @@ impl App {
                 }
             }
         });
-
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            ui.label(lang.t("M1 · 会话/配置/输入", "M1 · session / profiles / input"));
-        });
     }
-}
-
-impl App {
-    /// `--connect <name>`: select the profile and start the session once the UI
-    /// exists, so a soak run needs no mouse.
     fn run_pending_connect(&mut self) {
         let Some(wanted) = self.pending_connect.take() else {
             return;
@@ -3727,16 +3684,6 @@ impl eframe::App for App {
                     self.tab_bar(ui);
                 }
             });
-
-            // The landing screen is self-contained: no profile list, no tabs.
-            if !self.show_home {
-                egui::SidePanel::left("profiles")
-                    .resizable(true)
-                    .default_width(280.0)
-                    .show(ctx, |ui| {
-                        self.left_panel(ui, ctx);
-                    });
-            }
 
             egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
                 ui.horizontal(|ui| {

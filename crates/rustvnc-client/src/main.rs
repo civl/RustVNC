@@ -2039,7 +2039,7 @@ impl App {
         };
         // Let fonts, layout and the first frames settle.
         if !self.screenshot_requested {
-            if self.screenshot_started.elapsed() < Duration::from_millis(1500) {
+            if self.screenshot_started.elapsed() < Duration::from_millis(3500) {
                 ctx.request_repaint();
                 return;
             }

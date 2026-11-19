@@ -83,6 +83,27 @@ enum RenderAttempt {
     Glow,
 }
 
+/// macOS renders through Metal: DX12/Vulkan do not exist there, wgpu's GL backend
+/// has no surface support, and falling all the way to glow means the deprecated
+/// OpenGL path — which is what happened before Metal was listed first.
+#[cfg(target_os = "macos")]
+fn render_attempts() -> Vec<RenderAttempt> {
+    let metal = RenderAttempt::Wgpu {
+        backends: wgpu::Backends::METAL,
+    };
+    let glow = RenderAttempt::Glow;
+    match std::env::var("RUSTVNC_RENDERER")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "glow" => vec![glow],
+        "metal" => vec![metal],
+        _ => vec![metal, glow],
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 fn render_attempts() -> Vec<RenderAttempt> {
     let dx12 = RenderAttempt::Wgpu {
         backends: wgpu::Backends::DX12,

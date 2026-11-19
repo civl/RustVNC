@@ -29,6 +29,19 @@ const IDLE_GAP: Duration = Duration::from_millis(120);
 /// the two cases with a wide margin.
 const P95_BUDGET_MS: f64 = 20.0;
 
+/// Linear-interpolated percentile. Nearest-rank makes p95 equal to the maximum
+/// for a 12-sample run, so a single scheduler hiccup (one 23 ms sample on a
+/// shared CI machine) fails a test whose median is 1.2 ms.
+fn percentile(sorted: &[f64], percent: f64) -> f64 {
+    let rank = (percent / 100.0) * (sorted.len().saturating_sub(1)) as f64;
+    let low = rank.floor() as usize;
+    let high = rank.ceil() as usize;
+    if low == high {
+        return sorted[low];
+    }
+    sorted[low] + (sorted[high] - sorted[low]) * (rank - low as f64)
+}
+
 fn pixel_format() -> [u8; 16] {
     [32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0]
 }
@@ -183,8 +196,8 @@ async fn input_after_an_idle_stretch_refreshes_immediately() {
 
     let mut millis: Vec<f64> = samples.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
     millis.sort_by(f64::total_cmp);
-    let p50 = millis[millis.len() / 2];
-    let p95 = millis[(millis.len() * 95 / 100).min(millis.len() - 1)];
+    let p50 = percentile(&millis, 50.0);
+    let p95 = percentile(&millis, 95.0);
     let max = *millis.last().expect("samples");
     println!(
         "input->pixels: p50 {p50:.1} ms · p95 {p95:.1} ms · max {max:.1} ms · n={}",

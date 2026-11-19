@@ -22,10 +22,9 @@ esac
 BIN="$ROOT/target/$TARGET_DIR/rustvnc-client"
 APP="$ROOT/dist/RustVNC.app"
 
-if [[ ! -x "$BIN" ]]; then
-  echo "building rustvnc-client ($PROFILE)…"
-  ( cd "$ROOT" && cargo build "-p" rustvnc-client --"$PROFILE" )
-fi
+# Always build: skipping when the binary exists shipped a stale app once.
+echo "building rustvnc-client ($PROFILE)…"
+( cd "$ROOT" && cargo build "-p" rustvnc-client --"$PROFILE" )
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

@@ -4488,43 +4488,76 @@ mod renderer_tests {
     ///
     /// Windows must try native D3D12 first — it is what the compositor and
     /// remote-capture tools expect, while wgpu's own default (PRIMARY | GL)
-    /// enumerates Vulkan before it.
+    /// enumerates Vulkan before it. macOS uses Metal first, with glow as the
+    /// fallback.
     #[test]
-    fn the_renderer_chain_prefers_d3d12_and_can_be_pinned() {
+    fn the_renderer_chain_prefers_the_native_backend_and_can_be_pinned() {
         // SAFETY: this is the only test that touches `RUSTVNC_RENDERER`.
         unsafe { std::env::remove_var("RUSTVNC_RENDERER") };
         let chain = chain_of(&render_attempts(None));
-        assert!(
-            chain[0].contains("DX12"),
-            "first attempt must be D3D12: {chain:?}"
-        );
-        assert_eq!(chain.len(), 4, "unexpected chain: {chain:?}");
-        assert!(
-            chain.last().unwrap().contains("glow"),
-            "glow must be the last resort: {chain:?}"
-        );
 
-        for (value, expected) in [
-            ("dx12", "DX12"),
-            ("d3d12", "DX12"),
-            ("vulkan", "VULKAN"),
-            ("gl", "GL"),
-            ("glow", "glow"),
-        ] {
-            // SAFETY: sequential within this test.
-            unsafe { std::env::set_var("RUSTVNC_RENDERER", value) };
-            let pinned = chain_of(&render_attempts(Some(value)));
-            assert_eq!(
-                pinned.len(),
-                1,
-                "{value} should pin one backend: {pinned:?}"
-            );
+        #[cfg(target_os = "macos")]
+        {
             assert!(
-                pinned[0].contains(expected),
-                "{value} selected {}",
-                pinned[0]
+                chain[0].contains("METAL"),
+                "first attempt must be Metal: {chain:?}"
             );
+            assert_eq!(chain.len(), 2, "unexpected chain: {chain:?}");
+            assert!(
+                chain.last().unwrap().contains("glow"),
+                "glow must be the last resort: {chain:?}"
+            );
+            for (value, expected) in [("metal", "METAL"), ("glow", "glow")] {
+                // SAFETY: sequential within this test.
+                unsafe { std::env::set_var("RUSTVNC_RENDERER", value) };
+                let pinned = chain_of(&render_attempts(Some(value)));
+                assert_eq!(
+                    pinned.len(),
+                    1,
+                    "{value} should pin one backend: {pinned:?}"
+                );
+                assert!(
+                    pinned[0].contains(expected),
+                    "{value} selected {}",
+                    pinned[0]
+                );
+            }
         }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(
+                chain[0].contains("DX12"),
+                "first attempt must be D3D12: {chain:?}"
+            );
+            assert_eq!(chain.len(), 4, "unexpected chain: {chain:?}");
+            assert!(
+                chain.last().unwrap().contains("glow"),
+                "glow must be the last resort: {chain:?}"
+            );
+            for (value, expected) in [
+                ("dx12", "DX12"),
+                ("d3d12", "DX12"),
+                ("vulkan", "VULKAN"),
+                ("gl", "GL"),
+                ("glow", "glow"),
+            ] {
+                // SAFETY: sequential within this test.
+                unsafe { std::env::set_var("RUSTVNC_RENDERER", value) };
+                let pinned = chain_of(&render_attempts(Some(value)));
+                assert_eq!(
+                    pinned.len(),
+                    1,
+                    "{value} should pin one backend: {pinned:?}"
+                );
+                assert!(
+                    pinned[0].contains(expected),
+                    "{value} selected {}",
+                    pinned[0]
+                );
+            }
+        }
+
         // SAFETY: restore the shared environment for any later test.
         unsafe { std::env::remove_var("RUSTVNC_RENDERER") };
     }

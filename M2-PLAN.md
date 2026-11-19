@@ -17,7 +17,7 @@
 | M2b | 自适应控制器：快/慢环、滞回、手动锁定、HUD | ✅ 本轮已实现：延迟 EMA、双阈值、HUD、开关 | 完成 |
 | M2c | 多标签 / 托盘 / 通知 / 开机自启 | ✅ 多标签、托盘、开机自启已实现；通知待做 | 完成（通知除外） |
 | M2d | MSI/Authenticode/自动更新/回滚 | 自动更新/校验/回滚 + Inno + WiX MSI + tag 发布工作流；真实证书签名待补 | 基本完成 |
-| M2e | 性能/内存/CPU/8 小时 soak | ✅ 工具就绪：`scripts/bench-soak.ps1`（自动连接 + 采样 + 稳态回归 + 阈值）与 `--bench-frames`（本地呈现）、`tests/input_latency.rs`（输入→像素 P95）；已跑 2 分钟冒烟：空闲 CPU 0.88%、内存平稳 | 待真机 8h/4K60 |
+| M2e | 性能/内存/CPU/8 小时 soak | ✅ 工具就绪：`scripts/bench-soak.ps1`（自动连接 + 采样 + 稳态回归 + 阈值）与 `--bench-frames`（本地呈现）、`tests/input_latency.rs`（输入→像素 p50 守门，p95 记录）；已跑 2 分钟冒烟：空闲 CPU 0.88%、内存平稳 | 待真机 8h/4K60 |
 
 ## M2b：自适应控制器（本轮）
 

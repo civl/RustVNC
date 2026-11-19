@@ -24,10 +24,15 @@ const FRAMEBUFFER: (u16, u16) = (800, 600);
 const ITERATIONS: usize = 12;
 /// Idle gaps between probes, long enough for the controller to back off.
 const IDLE_GAP: Duration = Duration::from_millis(120);
-/// Budget for the 95th percentile. Measured values: ~1 ms when input wakes the
-/// request loop, ~47 ms (one poll interval) when it does not, so this separates
-/// the two cases with a wide margin.
-const P95_BUDGET_MS: f64 = 20.0;
+/// Median budget. Measured values: ~1 ms when input wakes the request loop,
+/// ~47 ms (one poll interval) when it does not, so the median separates the two
+/// cases with a wide margin. The p95 is reported but not used as the CI gate:
+/// with 12 samples it is dominated by shared-runner scheduler noise (one run
+/// showed 0,1,1,1,1,3,3,5,8,17,26,64 ms while the median stayed at 3.1 ms).
+const P50_BUDGET_MS: f64 = 10.0;
+/// A separate sanity ceiling so a severe regression still fails even if the
+/// median happens to be lucky.
+const P95_SANITY_MS: f64 = 100.0;
 
 /// Linear-interpolated percentile. Nearest-rank makes p95 equal to the maximum
 /// for a 12-sample run, so a single scheduler hiccup (one 23 ms sample on a
@@ -212,8 +217,12 @@ async fn input_after_an_idle_stretch_refreshes_immediately() {
             .join(" ")
     );
     assert!(
-        p95 < P95_BUDGET_MS,
-        "p95 {p95:.1} ms exceeds the {P95_BUDGET_MS} ms budget: input is waiting for the idle \
-         poll instead of requesting a frame (p50 {p50:.1} ms, max {max:.1} ms)"
+        p50 < P50_BUDGET_MS,
+        "median {p50:.1} ms exceeds the {P50_BUDGET_MS} ms budget: input is waiting for the idle \
+         poll instead of requesting a frame (p95 {p95:.1} ms, max {max:.1} ms)"
+    );
+    assert!(
+        p95 < P95_SANITY_MS,
+        "p95 {p95:.1} ms exceeds the {P95_SANITY_MS} ms sanity ceiling (p50 {p50:.1} ms)"
     );
 }

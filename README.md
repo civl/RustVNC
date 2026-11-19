@@ -133,6 +133,39 @@ packaging/windows/          # Inno Setup、WiX MSI、签名与更新 manifest �
 - [卡点分析与修复计划](BLOCKER-ANALYSIS.md) · [真机验收清单](ACCEPTANCE.md)
 - Agent 侧分册：[A0 骨架](README-A0.md) · [A1 控制面](README-A1.md) · [A2 菜单栏与剪贴板](README-A2.md) · [A2b 音频](README-A2B.md)
 
+## 自动化开关对照表
+
+界面上能点的东西都有等价的命令行入口，用来跑 soak、基准和 UI 自测（不需要人点鼠标）：
+
+| 开关 | 作用 |
+|---|---|
+| `--connect <配置名>` | 启动即连接该配置（`bench-soak.ps1` 用它无人值守） |
+| `--share` | 启动即开启被控端（macOS） |
+| `--settings` | 启动即打开设置窗口 |
+| `--form` | 跳过首页，直接进连接表单 |
+| `--show` | 强制显示主窗口（覆盖"启动时不弹窗"） |
+| `--minimized` | 强制隐藏到托盘/菜单栏 |
+| `--screenshot <png>` | 应用内截图后退出（绕开桌面截图的遮挡问题） |
+| `--bench-frames <秒>` `--bench-out <文件>` | 本地呈现统计（帧间隔分位数），测完退出 |
+| `--test-notification` | 发一条测试通知并退出 |
+| `--host-selftest` | 无界面验证"打包内的被控端能被找到、启动、读出配对码" |
+| `--ssh-askpass` | OpenSSH 调用的内部模式，不供手动使用 |
+
+Agent 二进制（随 `.app` 一起打包，也可单独运行）：
+
+| 开关 | 作用 |
+|---|---|
+| `--serve` | 无菜单栏、纯服务模式（soak 与自动化用） |
+| `--listen <地址:端口>` | 监听地址，默认 `0.0.0.0:8443` |
+| `--allow-resolution` | 允许远程切换分辨率（等价于菜单栏开关） |
+| `--pair-code <码>` | 固定配对码（自动化） |
+| `--no-audio` / `--no-keychain` | 跳过音频采集 / 钥匙串 |
+| `--diagnose-displays` | 打印权限与显示器列表，并写入 `displays.txt` |
+| `--request-screen-permission` | 弹出屏幕录制授权请求并等待结果 |
+| `--status` / `--register` / `--unregister` | 登录项状态与注册 |
+
+环境变量：`RUSTVNC_RENDERER`（渲染后端，优先级高于设置）、`RUSTVNC_ALLOW_MULTIPLE`（允许多实例）、`RUSTVNC_UPDATE_URL`（更新 manifest）、`MACOS_USERNAME` / `MACOS_PASSWORD`（自动化登录）。
+
 ## 设置与命令行开关
 
 界面右上角 ⚙ 里集中了这些开关（改动立即持久化到 `ui.json`）：

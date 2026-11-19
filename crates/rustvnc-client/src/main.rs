@@ -457,6 +457,8 @@ struct App {
     quitting: bool,
     hidden_to_tray: bool,
     start_minimized: bool,
+    /// Persisted preference behind `start_minimized`.
+    start_minimized_setting: bool,
     update_rx: Option<std::sync::mpsc::Receiver<Result<Option<UpdateInfo>, String>>>,
     update_install_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     update_status: String,
@@ -683,6 +685,23 @@ impl App {
             move || ctx.request_repaint()
         });
 
+        // Decided before the struct literal: `profiles` and `ui_state` are moved
+        // into it below.
+        let start_minimized_setting = ui_state.start_minimized.unwrap_or(true);
+        let first_run = profiles.profiles().is_empty();
+        let start_minimized = {
+            let has = |flag: &str| std::env::args().any(|arg| arg == flag);
+            // Both platforms start in the tray/menu bar when the preference says
+            // so; an explicit or interactive run always shows the window, and so
+            // does the first launch (there is nothing to open yet).
+            has("--minimized")
+                || (start_minimized_setting
+                    && !first_run
+                    && !has("--show")
+                    && !has("--screenshot")
+                    && !has("--connect"))
+        };
+
         Self {
             lang,
             profiles,
@@ -767,16 +786,8 @@ impl App {
             tray_rx,
             quitting: false,
             hidden_to_tray: false,
-            start_minimized: {
-                let has = |flag: &str| std::env::args().any(|arg| arg == flag);
-                // Menu-bar first on macOS: no window until the user asks for it,
-                // unless this run is explicitly interactive.
-                has("--minimized")
-                    || (cfg!(target_os = "macos")
-                        && !has("--show")
-                        && !has("--screenshot")
-                        && !has("--connect"))
-            },
+            start_minimized,
+            start_minimized_setting,
             update_rx: None,
             update_install_rx: None,
             update_status: String::new(),
@@ -857,6 +868,7 @@ impl App {
         self.ui_state.active = self.active_tab;
         self.ui_state.lang = Some(self.lang.tag().to_string());
         self.ui_state.notifications = Some(self.notifier.enabled());
+        self.ui_state.start_minimized = Some(self.start_minimized_setting);
         if let Err(err) = self.ui_state.save(&self.ui_state_path) {
             tracing::warn!("save {}: {err:#}", self.ui_state_path.display());
         }
@@ -2513,6 +2525,23 @@ impl App {
                 }
                 ui.end_row();
 
+                ui.label(lang.t("启动", "Startup"));
+                let mut start_minimized = self.start_minimized_setting;
+                if ui
+                    .checkbox(
+                        &mut start_minimized,
+                        lang.t(
+                            "启动时不弹窗，只驻留托盘/菜单栏",
+                            "Start in the tray / menu bar without a window",
+                        ),
+                    )
+                    .changed()
+                {
+                    self.start_minimized_setting = start_minimized;
+                    self.persist_ui();
+                }
+                ui.end_row();
+
                 ui.label(lang.t("系统通知", "Notifications"));
                 let mut notifications = self.notifier.enabled();
                 if ui
@@ -3855,12 +3884,16 @@ fn init_autostart() -> (Option<AutoLaunch>, bool) {
         .unwrap_or(false);
     // A menu-bar utility that is installed (not a dev build) should survive a
     // reboot; the settings checkbox still lets the user turn it off.
-    #[cfg(target_os = "macos")]
-    if !enabled && path.contains("/Applications/") {
-        if let Some(auto) = auto.as_ref() {
-            if auto.enable().is_ok() {
-                enabled = true;
-            }
+    if !enabled {
+        // An installed build should survive a reboot; a dev build should not
+        // register itself. The settings checkbox still turns it off.
+        let installed =
+            path.contains("/Applications/") || path.to_ascii_lowercase().contains("program files");
+        if installed
+            && let Some(auto) = auto.as_ref()
+            && auto.enable().is_ok()
+        {
+            enabled = true;
         }
     }
     (auto, enabled)
@@ -3878,12 +3911,16 @@ fn build_tray(
     let share = MenuItem::with_id("share", "共享本机", true, None);
     let code = MenuItem::with_id("code", "配对码：未开启", false, None);
     let quit = MenuItem::with_id("quit", "退出", true, None);
-    if menu.append(&show).is_err()
-        || menu.append(&share).is_err()
-        || menu.append(&code).is_err()
-        || menu.append(&PredefinedMenuItem::separator()).is_err()
-        || menu.append(&quit).is_err()
+    // The share entries only make sense where the host service exists.
+    let mut appends_ok = menu.append(&show).is_ok();
+    #[cfg(target_os = "macos")]
     {
+        appends_ok &= menu.append(&share).is_ok();
+        appends_ok &= menu.append(&code).is_ok();
+    }
+    appends_ok &= menu.append(&PredefinedMenuItem::separator()).is_ok();
+    appends_ok &= menu.append(&quit).is_ok();
+    if !appends_ok {
         return (None, None, None);
     }
     let Some(icon) = make_tray_icon() else {

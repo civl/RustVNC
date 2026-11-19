@@ -38,6 +38,9 @@ pub struct UiState {
     pub lang: Option<String>,
     /// Desktop notifications; absent means on.
     pub notifications: Option<bool>,
+    /// Start hidden in the tray/menu bar instead of opening a window.
+    #[serde(default)]
+    pub start_minimized: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -171,6 +174,7 @@ mod tests {
             },
             lang: Some("en".into()),
             notifications: Some(false),
+            start_minimized: Some(true),
         };
         state.save(&path).unwrap();
 

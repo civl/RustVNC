@@ -38,6 +38,16 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 flate2 = "1"
 tempfile = "3"
 
+[target.'cfg(windows)'.dependencies]
+# Single-instance mutex + the activation event another launch signals.
+# `Win32_Security` is required because CreateMutexW/CreateEventW take a
+# SECURITY_ATTRIBUTES pointer even when it is null.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",

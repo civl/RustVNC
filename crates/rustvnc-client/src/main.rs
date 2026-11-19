@@ -16,12 +16,19 @@ use rustvnc_client::credentials::CredentialStore;
 use rustvnc_client::input::{key_to_keysym, text_to_keysyms};
 use rustvnc_client::profiles::{Profile, ProfileStore};
 use rustvnc_client::session::{Session, SessionEvent};
+use rustvnc_client::single_instance::{self, InstanceHandle, SingleInstance};
 use rustvnc_client::ssh::{self, HostKeyProbe};
 use rustvnc_client::ui_state::UiState;
 use rustvnc_client::update::{self, UpdateInfo};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use vnc::{ClientKeyEvent, ClientMouseEvent, Rect, X11Event};
+
+/// Kernel object name for the single-instance guard.
+///
+/// Keep it stable across releases: a new name lets an old and a new build run
+/// side by side, which is exactly the corruption the guard exists to prevent.
+const APP_INSTANCE: &str = "RustVNC.Client";
 
 /// Command-line driven start-up behaviour, used by the soak and benchmark
 /// scripts (`scripts/bench-soak.ps1`) so they can run unattended.
@@ -145,9 +152,25 @@ fn main() -> eframe::Result {
     let _log_guard = rustvnc_client::diag::init_tracing();
     let startup = startup_options();
 
+    // One client per session. Two copies hold their own in-memory `profiles.json`
+    // and `ui.json` and save them wholesale, so the later writer silently drops
+    // the other's tabs and settings. The loser wakes the winner and exits — it
+    // has no window of its own to explain itself with.
+    let instance = if std::env::var_os("RUSTVNC_ALLOW_MULTIPLE").is_some() {
+        SingleInstance::standalone()
+    } else {
+        SingleInstance::acquire(APP_INSTANCE)
+    };
+    if !instance.is_primary() {
+        let raised = single_instance::signal_existing(APP_INSTANCE);
+        tracing::info!("another RustVNC instance is running (raised={raised}); exiting");
+        return Ok(());
+    }
+    let instance_handle = instance.handle();
+
     let mut last_error = Ok(());
     for attempt in render_attempts() {
-        match run_native(attempt, startup.clone()) {
+        match run_native(attempt, startup.clone(), instance_handle.clone()) {
             Ok(()) => return Ok(()),
             Err(err) => {
                 tracing::warn!("renderer {attempt:?} unavailable: {err}");
@@ -158,7 +181,11 @@ fn main() -> eframe::Result {
     last_error
 }
 
-fn run_native(attempt: RenderAttempt, startup: StartupOptions) -> eframe::Result {
+fn run_native(
+    attempt: RenderAttempt,
+    startup: StartupOptions,
+    instance: InstanceHandle,
+) -> eframe::Result {
     let renderer = match attempt {
         RenderAttempt::Wgpu { .. } => eframe::Renderer::Wgpu,
         RenderAttempt::Glow => eframe::Renderer::Glow,
@@ -198,7 +225,7 @@ fn run_native(attempt: RenderAttempt, startup: StartupOptions) -> eframe::Result
     eframe::run_native(
         "RustVNC",
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, startup, ui_state)))),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, startup, ui_state, instance)))),
     )
 }
 
@@ -321,6 +348,10 @@ struct App {
     /// and its frame in `frame` so all existing rendering code stays single-tab.
     tabs: Vec<Tab>,
     active_tab: Option<usize>,
+    /// Shared with the single-instance guard: another launch bumps its counter.
+    instance: InstanceHandle,
+    /// Last raise count the UI has handled.
+    raise_seen: usize,
     /// The workspace as it was restored, kept up to date with the window
     /// geometry so [`Self::persist_ui`] can write the whole thing back.
     ui_state: UiState,
@@ -490,6 +521,7 @@ impl App {
         cc: &eframe::CreationContext<'_>,
         startup: StartupOptions,
         mut ui_state: UiState,
+        instance: InstanceHandle,
     ) -> Self {
         rustvnc_client::fonts::install_cjk_font(&cc.egui_ctx);
         let path = ProfileStore::default_path();
@@ -540,6 +572,12 @@ impl App {
             .unwrap_or(Lang::Zh);
         let (tray, tray_rx) = build_tray(cc.egui_ctx.clone());
         let (autostart, autostart_enabled) = init_autostart();
+        // A window hidden to the tray may not be repainting, so the guard's
+        // listener needs a way to wake the UI when another launch asks for it.
+        instance.set_waker({
+            let ctx = cc.egui_ctx.clone();
+            move || ctx.request_repaint()
+        });
 
         Self {
             lang,
@@ -601,6 +639,8 @@ impl App {
             active_tab,
             ui_state,
             ui_state_path: UiState::default_path(),
+            instance,
+            raise_seen: 0,
             autostart,
             autostart_enabled,
             _tray: tray,
@@ -614,6 +654,28 @@ impl App {
             available_update: None,
             show_update: false,
         }
+    }
+
+    /// Bring the window forward when another launch asked for it.
+    ///
+    /// The losing process has already exited; poking this one is all it can do.
+    fn poll_raise_request(&mut self, ctx: &egui::Context) {
+        let seen = self.instance.raise_count();
+        if seen == self.raise_seen {
+            return;
+        }
+        self.raise_seen = seen;
+        // It may have been minimised to the tray, which also means it was not
+        // repainting — hence the waker the guard holds.
+        self.hidden_to_tray = false;
+        self.start_minimized = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.status = self
+            .lang
+            .t("已在运行的窗口中被唤起", "Raised the running window")
+            .to_string();
     }
 
     /// Track the window geometry so a later [`Self::persist_ui`] can save it.
@@ -2712,6 +2774,7 @@ impl eframe::App for App {
             }
         }
         self.capture_window_state(ctx);
+        self.poll_raise_request(ctx);
         self.run_pending_connect();
         self.poll_host_key_probe();
         if self.host_key_probe_rx.is_some() {

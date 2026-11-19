@@ -5,6 +5,7 @@ pub mod fonts;
 pub mod input;
 pub mod profiles;
 pub mod session;
+pub mod single_instance;
 pub mod ssh;
 pub mod ui_state;
 pub mod update;

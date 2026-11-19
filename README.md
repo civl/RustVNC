@@ -26,7 +26,7 @@ Windows 客户端 ── RFB/SSH (5900) ──────────► macOS 
 | **输入** | 完整修饰键状态机、Windows→macOS 修饰键映射（可配）、特殊键菜单、远端光标形状（32bpp） |
 | **视图** | 适应窗口 / 1:1 像素 / 50% / 100% / 200%，超出视口双向滚动；HiDPI 按 `pixels_per_point` 换算；全屏（F11） |
 | **会话** | 多标签（后台标签暂停请求、切回 `FullRefresh`）、重启还原标签与窗口几何、自动重连（指数退避）、连接/握手超时 |
-| **系统** | 托盘常驻（关窗隐藏）、开机自启（`--minimized` 静默启动）、凭据存 Credential Manager、诊断日志与诊断包 |
+| **系统** | 单实例互斥（再次启动会唤起已有窗口）、托盘常驻（关窗隐藏）、开机自启（`--minimized` 静默启动）、凭据存 Credential Manager、诊断日志与诊断包 |
 | **安装** | Inno Setup 安装包 + WiX per-user MSI；Authenticode 签名脚本；manifest 更新（SHA-256 校验 + 回滚） |
 | **Agent** | 8 位配对码（300 秒一次性，带尝试次数与按 IP 限流）、mTLS 证书固定、剪贴板、Opus 48 kHz 立体声、**自动降分辨率**（按客户端屏幕选目标，帧率 <30 时逐级下退） |
 
@@ -87,7 +87,7 @@ ed25519 密钥 + `authorized_keys` 指引。host key 首次连接需显式信任
 
 | 项目 | 现状 |
 |---|---|
-| 测试 | Windows 侧 **153 个**（含 mock RFB 端到端、QUIC 回环、像素级比对、输入延迟基准、协议属性测试）；macOS 侧由 CI 覆盖 |
+| 测试 | Windows 侧 **157 个**（含 mock RFB 端到端、QUIC 回环、像素级比对、输入延迟基准、协议属性测试）；macOS 侧由 CI 覆盖 |
 | 质量门 | `cargo fmt --check`、`clippy -D warnings`、**debug 与 release 双模式测试**、actionlint + shellcheck |
 | 一键验收 | `powershell -File scripts/acceptance.ps1`（8 步，含真机探针） |
 | 性能预算 | `scripts/bench-soak.ps1`（CPU/内存/句柄 + 稳态回归 + 阈值判定）、`--bench-frames`（本地呈现）、`tests/input_latency.rs`（输入→像素 P95） |
@@ -141,6 +141,7 @@ packaging/windows/          # Inno Setup、WiX MSI、签名与更新 manifest �
 | `MACOS_USERNAME` | macOS 账号；缺省时取已保存配置里的账号 |
 | `MACOS_PASSWORD` | macOS 账号密码；设置了就用于本次会话，且**不写入凭据库**（测试/自动化专用） |
 | `RUSTVNC_RENDERER` | 强制渲染后端：`dx12` / `vulkan` / `gl` / `glow` |
+| `RUSTVNC_ALLOW_MULTIPLE` | 跳过单实例互斥（soak / 基准脚本需要独立被测进程时用） |
 
 ## 已知限制
 

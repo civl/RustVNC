@@ -59,6 +59,9 @@ if ($Attach) {
     if (-not (Test-Path $Exe)) { throw "找不到客户端：$Exe（先 cargo build --release -p rustvnc-client）" }
     $arguments = @()
     if ($Connect) { $arguments += @('--connect', $Connect) }
+    # 客户端是单实例的：桌面上开着一个就会让这里启动的副本立刻退出。
+    # 冒烟/soak 明确需要一个独立的被测进程，所以显式放行。
+    $env:RUSTVNC_ALLOW_MULTIPLE = '1'
     Write-Host "启动 $Exe $($arguments -join ' ')"
     $proc = Start-Process -FilePath $Exe -ArgumentList $arguments -PassThru
     Start-Sleep -Seconds 3

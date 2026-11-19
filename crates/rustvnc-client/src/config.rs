@@ -162,6 +162,57 @@ impl ViewMode {
     }
 }
 
+/// A rectangle of the remote framebuffer, in remote pixels.
+///
+/// A Mac with several displays hands the client one merged frame, so two screens
+/// side by side at 5K become one 8960-pixel-wide image. Picking a region only
+/// changes what is drawn and where pointer coordinates land: the server still
+/// encodes the whole frame, so this is a view convenience, not a bandwidth win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewRegion {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl ViewRegion {
+    pub fn full(width: u16, height: u16) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    /// Intersect with `frame`, or `None` when nothing is left.
+    ///
+    /// Applied every frame rather than once at connect time: the remote can
+    /// resize underneath a saved region.
+    pub fn clamp_to(self, frame: Self) -> Option<Self> {
+        let left = u32::from(self.x).max(u32::from(frame.x));
+        let top = u32::from(self.y).max(u32::from(frame.y));
+        let right = (u32::from(self.x) + u32::from(self.width))
+            .min(u32::from(frame.x) + u32::from(frame.width));
+        let bottom = (u32::from(self.y) + u32::from(self.height))
+            .min(u32::from(frame.y) + u32::from(frame.height));
+        if right <= left || bottom <= top {
+            return None;
+        }
+        Some(Self {
+            x: left as u16,
+            y: top as u16,
+            width: (right - left) as u16,
+            height: (bottom - top) as u16,
+        })
+    }
+
+    pub fn area(self) -> u64 {
+        u64::from(self.width) * u64::from(self.height)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ResolutionPreset {
     /// Fit the Mac display mode to the client screen and step down when the
@@ -363,6 +414,14 @@ pub struct ClientConfig {
     /// to be validated against the macOS build in use.
     #[serde(default)]
     pub apple_encodings: bool,
+    /// Draw only this part of the framebuffer (M2a). `None` = the whole frame.
+    ///
+    /// A Mac with several displays still hands the client one merged frame, so a
+    /// user with two screens sees both side by side at half the usable size.
+    /// This picks the visible part; the server keeps encoding the whole frame, so
+    /// it is a view convenience, not a bandwidth saving.
+    #[serde(default)]
+    pub view_region: Option<ViewRegion>,
     #[serde(default)]
     pub agent: AgentConfig,
     pub security: SecurityMode,
@@ -388,6 +447,7 @@ impl Default for ClientConfig {
             adaptive: true,
             key_mapping: KeyMapping::standard(),
             apple_encodings: false,
+            view_region: None,
             agent: AgentConfig::default(),
             security: SecurityMode::Direct,
             ssh: SshConfig::default(),
@@ -492,6 +552,81 @@ mod tests {
         assert_eq!(ViewMode::Percent100.scale(2.0), Some(1.0));
         assert_eq!(ViewMode::Percent200.scale(2.0), Some(2.0));
         assert_eq!(ViewMode::Fit.scale(2.0), None);
+    }
+
+    #[test]
+    fn a_region_inside_the_frame_is_kept_as_is() {
+        let frame = ViewRegion::full(8960, 2880);
+        let region = ViewRegion {
+            x: 4480,
+            y: 0,
+            width: 4480,
+            height: 2880,
+        };
+        assert_eq!(region.clamp_to(frame), Some(region));
+    }
+
+    #[test]
+    fn a_region_is_clamped_to_a_smaller_frame() {
+        // Saved on the 8960-wide desktop, restored after the Mac dropped to one
+        // 5K screen: the right half no longer exists, so only the overlap stays.
+        let frame = ViewRegion::full(5120, 2880);
+        let region = ViewRegion {
+            x: 4480,
+            y: 0,
+            width: 4480,
+            height: 2880,
+        };
+        assert_eq!(
+            region.clamp_to(frame),
+            Some(ViewRegion {
+                x: 4480,
+                y: 0,
+                width: 640,
+                height: 2880,
+            })
+        );
+    }
+
+    #[test]
+    fn a_region_outside_the_frame_disappears_instead_of_panicking() {
+        let frame = ViewRegion::full(1920, 1080);
+        let region = ViewRegion {
+            x: 1920,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        assert_eq!(region.clamp_to(frame), None);
+        assert_eq!(ViewRegion::full(0, 0).clamp_to(frame), None);
+    }
+
+    #[test]
+    fn a_view_region_survives_a_profile_round_trip() {
+        let region = ViewRegion {
+            x: 4480,
+            y: 0,
+            width: 4480,
+            height: 2880,
+        };
+        let config = ClientConfig {
+            view_region: Some(region),
+            ..ClientConfig::default()
+        };
+        let json = serde_json::to_string(&config).expect("serialize");
+        let reloaded: ClientConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(reloaded.view_region, Some(region));
+    }
+
+    #[test]
+    fn a_profile_without_a_view_region_still_loads() {
+        // Every profile written before M2a lacks the field.
+        let json = r#"{"host":"mac.local","port":5900,"shared":true,"auto_reconnect":true,
+            "user":"","auth":"Auto","quality":"High","bpp":32,"encoding":"Zrle",
+            "security":"Direct","ssh":{"user":"","port":22,"key_path":"","known_hosts":""}}"#;
+        let config: ClientConfig = serde_json::from_str(json).expect("legacy profile");
+        assert_eq!(config.view_region, None);
+        assert_eq!(config.view_mode, ViewMode::Fit);
     }
 
     #[test]

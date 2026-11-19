@@ -10,7 +10,7 @@ use rustvnc_agent_client::{
 };
 use rustvnc_client::config::{
     AuthMode, ClientConfig, EncodingPreference, KeyMapping, ModifierTarget, QualityPreset,
-    ResolutionPreset, SecurityMode, ViewMode,
+    ResolutionPreset, SecurityMode, ViewMode, ViewRegion,
 };
 use rustvnc_client::credentials::CredentialStore;
 use rustvnc_client::input::{key_to_keysym, text_to_keysyms};
@@ -365,6 +365,8 @@ struct App {
     agent_pair_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// Floating key-mapping editor.
     show_keymap: bool,
+    /// The "view region" picker window is open.
+    show_region: bool,
     /// Tabs with inactive sessions. The active tab's session lives in `session`
     /// and its frame in `frame` so all existing rendering code stays single-tab.
     tabs: Vec<Tab>,
@@ -662,6 +664,7 @@ impl App {
             pending_resolution: None,
             agent_pair_rx: None,
             show_keymap: false,
+            show_region: false,
             tabs,
             active_tab,
             ui_state,
@@ -1796,6 +1799,20 @@ impl App {
         self.first_pending = None;
     }
 
+    /// The part of the framebuffer on screen.
+    ///
+    /// The saved region is clamped to the frame that actually arrived, every
+    /// frame: the remote can resize under a saved region, and a region that no
+    /// longer overlaps simply falls back to the whole frame.
+    fn visible_region(&self) -> ViewRegion {
+        let frame = ViewRegion::full(self.frame.width as u16, self.frame.height as u16);
+        self.draft
+            .config
+            .view_region
+            .and_then(|region| region.clamp_to(frame))
+            .unwrap_or(frame)
+    }
+
     fn session_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, chrome: bool) {
         let lang = self.lang;
         if chrome {
@@ -1825,6 +1842,16 @@ impl App {
                     if selected_view != current_view {
                         self.draft.config.view_mode = selected_view;
                         self.save_profile();
+                    }
+                    if ui
+                        .button(lang.t("区域…", "Region…"))
+                        .on_hover_text(lang.t(
+                            "只显示远端画面的一部分（多显示器时按屏取景）",
+                            "Show only part of the remote frame (per-display framing)",
+                        ))
+                        .clicked()
+                    {
+                        self.show_region = true;
                     }
                     ui.label(lang.t("视图", "View"));
                     let current = self.draft.config.quality;
@@ -1868,7 +1895,10 @@ impl App {
             return;
         };
 
-        let size = egui::vec2(self.frame.width as f32, self.frame.height as f32);
+        // Only the visible region is laid out; the texture still holds the whole
+        // framebuffer and the UV rect below maps the crop out of it.
+        let region = self.visible_region();
+        let size = egui::vec2(f32::from(region.width), f32::from(region.height));
         let ppp = ctx.pixels_per_point().max(0.1);
         let scale = self.draft.config.view_mode.scale(ppp).unwrap_or_else(|| {
             let fit = (available.x / size.x).min(available.y / size.y);
@@ -1877,6 +1907,10 @@ impl App {
         });
         let display = size * scale;
         let image = egui::Image::new(egui::load::SizedTexture::new(texture.id(), display))
+            .uv(region_uv(
+                region,
+                (self.frame.width as u16, self.frame.height as u16),
+            ))
             .sense(egui::Sense::click_and_drag());
         let needs_scroll = display.x > available.x || display.y > available.y;
         let response = if needs_scroll {
@@ -1915,17 +1949,24 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
             return;
         };
-        ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
         let Some((x, y, _)) = self.last_pointer else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
             return;
         };
         let rect = cursor_screen_rect(
             image_rect,
-            (self.frame.width, self.frame.height),
+            self.visible_region(),
             (x, y),
             cursor.hotspot,
             cursor.size,
         );
+        // A remote pointer outside the visible region has nowhere to land; keep
+        // the local cursor rather than painting an arrow over the chrome.
+        if !image_rect.intersects(rect) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
         let clip = ui.clip_rect();
         ui.set_clip_rect(image_rect);
         egui::Image::new(egui::load::SizedTexture::new(
@@ -2372,11 +2413,7 @@ impl App {
         if let Some(position) = hover
             && image_rect.contains(position)
         {
-            let relative = (position - image_rect.min) / image_rect.size();
-            let x = (relative.x * self.frame.width as f32).clamp(0.0, (self.frame.width - 1) as f32)
-                as u16;
-            let y = (relative.y * self.frame.height as f32)
-                .clamp(0.0, (self.frame.height - 1) as f32) as u16;
+            let (x, y) = framebuffer_point(self.visible_region(), image_rect, position);
             if self.last_pointer != Some((x, y, mask)) {
                 self.send_pointer(x, y, mask);
                 self.last_pointer = Some((x, y, mask));
@@ -2630,6 +2667,149 @@ impl App {
         self.show_keymap = open;
         self.draft.config.key_mapping = mapping;
         if save {
+            self.save_profile();
+        }
+    }
+
+    /// Pick the part of the remote frame that is drawn.
+    ///
+    /// The layout this exists for is the merged multi-display frame:
+    /// `[left screen][right screen]`, so halves cover the common case and the
+    /// numeric fields cover everything else. Cropping does not reduce bandwidth —
+    /// the server still encodes the whole frame — and the window says so rather
+    /// than letting the user expect a cheaper session.
+    fn region_window(&mut self, ctx: &egui::Context) {
+        let lang = self.lang;
+        let frame = ViewRegion::full(self.frame.width as u16, self.frame.height as u16);
+        let mut region = self.visible_region();
+        let mut open = self.show_region;
+        let mut save = false;
+
+        egui::Window::new(lang.t("视图区域", "View region"))
+            .open(&mut open)
+            .resizable(false)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                if frame.width == 0 || frame.height == 0 {
+                    ui.label(lang.t("先连接一台 Mac", "Connect to a Mac first"));
+                    return;
+                }
+                let label = lang.t("远端画面", "Remote frame");
+                ui.label(format!("{label}: {}×{}", frame.width, frame.height));
+                ui.horizontal_wrapped(|ui| {
+                    let half_width = frame.width / 2;
+                    let half_height = frame.height / 2;
+                    let halves = [
+                        (lang.t("整屏", "Whole"), frame),
+                        (
+                            lang.t("左半", "Left half"),
+                            ViewRegion {
+                                x: 0,
+                                y: 0,
+                                width: half_width,
+                                height: frame.height,
+                            },
+                        ),
+                        (
+                            lang.t("右半", "Right half"),
+                            ViewRegion {
+                                x: half_width,
+                                y: 0,
+                                width: frame.width - half_width,
+                                height: frame.height,
+                            },
+                        ),
+                        (
+                            lang.t("上半", "Top half"),
+                            ViewRegion {
+                                x: 0,
+                                y: 0,
+                                width: frame.width,
+                                height: half_height,
+                            },
+                        ),
+                        (
+                            lang.t("下半", "Bottom half"),
+                            ViewRegion {
+                                x: 0,
+                                y: half_height,
+                                width: frame.width,
+                                height: frame.height - half_height,
+                            },
+                        ),
+                    ];
+                    for (label, preset) in halves {
+                        if ui.button(label).clicked() {
+                            region = preset;
+                            save = true;
+                        }
+                    }
+                });
+                ui.separator();
+
+                let mut x = u32::from(region.x);
+                let mut y = u32::from(region.y);
+                let mut width = u32::from(region.width);
+                let mut height = u32::from(region.height);
+                let mut changed = false;
+                egui::Grid::new("region-fields")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("X");
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut x).range(0..=u32::from(frame.width)))
+                            .changed();
+                        ui.end_row();
+                        ui.label("Y");
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut y).range(0..=u32::from(frame.height)))
+                            .changed();
+                        ui.end_row();
+                        ui.label(lang.t("宽", "Width"));
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut width)
+                                    .range(1..=u32::from(frame.width)),
+                            )
+                            .changed();
+                        ui.end_row();
+                        ui.label(lang.t("高", "Height"));
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut height)
+                                    .range(1..=u32::from(frame.height)),
+                            )
+                            .changed();
+                        ui.end_row();
+                    });
+                if changed {
+                    // Re-clamp after every edit: the fields are independent, so an
+                    // X of 4000 with a width of 4000 would otherwise leave the frame.
+                    let edited = ViewRegion {
+                        x: x.min(u32::from(u16::MAX)) as u16,
+                        y: y.min(u32::from(u16::MAX)) as u16,
+                        width: width.clamp(1, u32::from(u16::MAX)) as u16,
+                        height: height.clamp(1, u32::from(u16::MAX)) as u16,
+                    };
+                    region = edited.clamp_to(frame).unwrap_or(frame);
+                    save = true;
+                }
+
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(lang.t(
+                        "只影响显示与鼠标映射；服务端仍编码整帧，带宽不会因此下降。",
+                        "Display and pointer mapping only; the server still encodes the whole frame.",
+                    ))
+                    .small(),
+                );
+            });
+
+        self.show_region = open;
+        if save {
+            // A full-frame region is stored as `None`, so "whole screen" means
+            // the absence of a setting rather than a redundant one.
+            self.draft.config.view_region = (region != frame).then_some(region);
             self.save_profile();
         }
     }
@@ -3023,6 +3203,9 @@ impl eframe::App for App {
         if self.show_keymap {
             self.keymap_window(ctx);
         }
+        if self.show_region {
+            self.region_window(ctx);
+        }
         if self.show_update {
             self.update_window(ctx);
         }
@@ -3126,20 +3309,59 @@ fn bgra_to_rgba(bgra: &[u8], size: (u16, u16)) -> Option<Vec<u8>> {
 /// a frame ahead of the pixels.
 fn cursor_screen_rect(
     image_rect: egui::Rect,
-    framebuffer: (usize, usize),
+    region: ViewRegion,
     remote_pointer: (u16, u16),
     hotspot: (u16, u16),
     size: (u16, u16),
 ) -> egui::Rect {
-    let scale = image_rect.width() / framebuffer.0.max(1) as f32;
+    let scale = image_rect.width() / f32::from(region.width.max(1));
     let origin = egui::pos2(
-        image_rect.min.x + (f32::from(remote_pointer.0) - f32::from(hotspot.0)) * scale,
-        image_rect.min.y + (f32::from(remote_pointer.1) - f32::from(hotspot.1)) * scale,
+        image_rect.min.x
+            + (f32::from(remote_pointer.0) - f32::from(region.x) - f32::from(hotspot.0)) * scale,
+        image_rect.min.y
+            + (f32::from(remote_pointer.1) - f32::from(region.y) - f32::from(hotspot.1)) * scale,
     );
     egui::Rect::from_min_size(
         origin,
         egui::vec2(f32::from(size.0) * scale, f32::from(size.1) * scale),
     )
+}
+
+/// Normalised texture coordinates of `region` inside `frame`.
+///
+/// The framebuffer texture always holds the whole frame; a view region only
+/// changes which part of it is sampled.
+fn region_uv(region: ViewRegion, frame: (u16, u16)) -> egui::Rect {
+    let width = f32::from(frame.0.max(1));
+    let height = f32::from(frame.1.max(1));
+    let right = u32::from(region.x) + u32::from(region.width);
+    let bottom = u32::from(region.y) + u32::from(region.height);
+    egui::Rect::from_min_max(
+        egui::pos2(f32::from(region.x) / width, f32::from(region.y) / height),
+        egui::pos2(
+            right.min(u32::from(frame.0)) as f32 / width,
+            bottom.min(u32::from(frame.1)) as f32 / height,
+        ),
+    )
+}
+
+/// Where a screen position inside `image_rect` lands in the framebuffer.
+///
+/// With a view region the image shows only that part, so a click has to be
+/// mapped into the region — mapping into the whole frame would send every click
+/// near the desktop's top-left instead of where the user pointed.
+fn framebuffer_point(
+    region: ViewRegion,
+    image_rect: egui::Rect,
+    position: egui::Pos2,
+) -> (u16, u16) {
+    let size = image_rect.size();
+    let relative = (position - image_rect.min) / egui::vec2(size.x.max(1.0), size.y.max(1.0));
+    let x = f32::from(region.x) + relative.x.clamp(0.0, 1.0) * f32::from(region.width);
+    let y = f32::from(region.y) + relative.y.clamp(0.0, 1.0) * f32::from(region.height);
+    let max_x = region.x.saturating_add(region.width.saturating_sub(1));
+    let max_y = region.y.saturating_add(region.height.saturating_sub(1));
+    ((x as u16).min(max_x), (y as u16).min(max_y))
 }
 
 fn keyboard_icon(ui: &mut egui::Ui, lang: Lang) -> egui::Response {
@@ -3698,7 +3920,13 @@ mod cursor_tests {
     fn cursor_is_placed_by_hotspot_at_display_scale() {
         let image = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(800.0, 450.0));
         // 1600x900 framebuffer shown at 800x450 => scale 0.5.
-        let rect = cursor_screen_rect(image, (1600, 900), (400, 300), (2, 2), (24, 24));
+        let rect = cursor_screen_rect(
+            image,
+            ViewRegion::full(1600, 900),
+            (400, 300),
+            (2, 2),
+            (24, 24),
+        );
         assert!((rect.min.x - 299.0).abs() < 0.01, "x = {}", rect.min.x);
         assert!((rect.min.y - 199.0).abs() < 0.01, "y = {}", rect.min.y);
         assert!((rect.width() - 12.0).abs() < 0.01, "w = {}", rect.width());
@@ -3708,7 +3936,109 @@ mod cursor_tests {
     #[test]
     fn a_zero_sized_framebuffer_does_not_divide_by_zero() {
         let image = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0));
-        let rect = cursor_screen_rect(image, (0, 0), (5, 5), (0, 0), (10, 10));
+        let rect = cursor_screen_rect(image, ViewRegion::full(0, 0), (5, 5), (0, 0), (10, 10));
         assert!(rect.min.x.is_finite() && rect.width().is_finite());
+    }
+
+    /// The right half of a 8960-wide desktop is drawn alone; the pointer sits at
+    /// its left edge in the region, which is the middle of the framebuffer.
+    #[test]
+    fn cursor_is_offset_by_the_region_origin() {
+        let image = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(4480.0, 2880.0));
+        let region = ViewRegion {
+            x: 4480,
+            y: 0,
+            width: 4480,
+            height: 2880,
+        };
+        let rect = cursor_screen_rect(image, region, (4480, 0), (0, 0), (10, 10));
+        assert!((rect.min.x - 0.0).abs() < 0.01, "x = {}", rect.min.x);
+        let rect = cursor_screen_rect(image, region, (8960, 2880), (2, 2), (10, 10));
+        assert!((rect.min.x - 4478.0).abs() < 0.01, "x = {}", rect.min.x);
+    }
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::*;
+
+    fn image(width: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(width, width / 2.0))
+    }
+
+    #[test]
+    fn a_full_region_maps_like_the_whole_frame() {
+        let region = ViewRegion::full(800, 400);
+        let rect = image(800.0);
+        assert_eq!(framebuffer_point(region, rect, rect.min), (0, 0));
+        assert_eq!(framebuffer_point(region, rect, rect.max), (799, 399));
+        let center = rect.center();
+        let (x, y) = framebuffer_point(region, rect, center);
+        assert_eq!((x, y), (400, 200));
+    }
+
+    #[test]
+    fn a_right_half_region_maps_into_that_half() {
+        let region = ViewRegion {
+            x: 400,
+            y: 0,
+            width: 400,
+            height: 400,
+        };
+        let rect = image(400.0);
+        // Left edge of the drawn image is the middle of the framebuffer, not 0.
+        assert_eq!(framebuffer_point(region, rect, rect.min), (400, 0));
+        // Right edge is the last pixel of the region, not of the frame.
+        assert_eq!(framebuffer_point(region, rect, rect.max), (799, 399));
+        let (x, _) = framebuffer_point(region, rect, rect.center());
+        assert_eq!(x, 600);
+    }
+
+    #[test]
+    fn pointer_coordinates_never_leave_the_region() {
+        let region = ViewRegion {
+            x: 100,
+            y: 50,
+            width: 10,
+            height: 10,
+        };
+        let rect = image(10.0);
+        assert_eq!(framebuffer_point(region, rect, rect.max), (109, 59));
+        // A position outside the image is clamped rather than wrapping.
+        let outside = egui::pos2(rect.max.x + 500.0, rect.min.y - 500.0);
+        assert_eq!(framebuffer_point(region, rect, outside), (109, 50));
+    }
+
+    #[test]
+    fn uv_covers_the_region_relative_to_the_frame() {
+        let frame = (800u16, 400u16);
+        let left = region_uv(
+            ViewRegion {
+                x: 0,
+                y: 0,
+                width: 400,
+                height: 400,
+            },
+            frame,
+        );
+        assert!((left.min.x - 0.0).abs() < f32::EPSILON);
+        assert!((left.max.x - 0.5).abs() < f32::EPSILON);
+        let right = region_uv(
+            ViewRegion {
+                x: 400,
+                y: 0,
+                width: 400,
+                height: 400,
+            },
+            frame,
+        );
+        assert!((right.min.x - 0.5).abs() < f32::EPSILON);
+        assert!((right.max.x - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_zero_frame_does_not_produce_nan_uvs() {
+        let uv = region_uv(ViewRegion::full(0, 0), (0, 0));
+        assert!(uv.min.x.is_finite() && uv.max.y.is_finite());
     }
 }

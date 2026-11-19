@@ -24,7 +24,7 @@ Windows 客户端 ── RFB/SSH (5900) ──────────► macOS 
 | **画面** | ZRLE / zlib / CopyRect / Raw；16/32bpp；Apple 私有编码 1104/1107/1109/1110 解析；未知编码明确报错而非静默错乱 |
 | **传输** | 单请求在途 + 整帧呈现；自适应请求节奏（延迟 EMA + 双阈值滞回）；静止自动降频 |
 | **输入** | 完整修饰键状态机、Windows→macOS 修饰键映射（可配）、特殊键菜单、远端光标形状（32bpp） |
-| **视图** | 适应窗口 / 1:1 像素 / 50% / 100% / 200%，超出视口双向滚动；HiDPI 按 `pixels_per_point` 换算；全屏（F11） |
+| **视图** | 适应窗口 / 1:1 像素 / 50% / 100% / 200%，超出视口双向滚动；HiDPI 按 `pixels_per_point` 换算；全屏（F11）；**区域裁切**（整屏/左右上下半/自定义，多显示器合并画面按屏取景） |
 | **会话** | 多标签（后台标签暂停请求、切回 `FullRefresh`）、重启还原标签与窗口几何、自动重连（指数退避）、连接/握手超时 |
 | **系统** | 单实例互斥（按用户，跨登录会话；再次启动会唤起已有窗口）、托盘常驻（关窗隐藏）、系统通知（断线/重连/新版本，窗口在前台时不弹）、开机自启（`--minimized` 静默启动）、凭据存 Credential Manager、诊断日志与诊断包 |
 | **安装** | Inno Setup 安装包 + WiX per-user MSI；Authenticode 签名脚本；manifest 更新（SHA-256 校验 + 回滚） |
@@ -87,7 +87,7 @@ ed25519 密钥 + `authorized_keys` 指引。host key 首次连接需显式信任
 
 | 项目 | 现状 |
 |---|---|
-| 测试 | Windows 侧 **162 个**（含 mock RFB 端到端、QUIC 回环、像素级比对、输入延迟基准、协议属性测试）；macOS 侧由 CI 覆盖 |
+| 测试 | Windows 侧 **173 个**（含 mock RFB 端到端、QUIC 回环、像素级比对、输入延迟基准、协议属性测试）；macOS 侧由 CI 覆盖 |
 | 质量门 | `cargo fmt --check`、`clippy -D warnings`、**debug 与 release 双模式测试**、actionlint + shellcheck |
 | 一键验收 | `powershell -File scripts/acceptance.ps1`（8 步，含真机探针） |
 | 性能预算 | `scripts/bench-soak.ps1`（CPU/内存/句柄 + 稳态回归 + 阈值判定）、`--bench-frames`（本地呈现）、`tests/input_latency.rs`（输入→像素 P95） |
@@ -145,7 +145,8 @@ packaging/windows/          # Inno Setup、WiX MSI、签名与更新 manifest �
 
 ## 已知限制
 
-- **多显示器**：仍是 macOS 合成的单个 framebuffer，未做按屏裁切/选择（M2a 收尾项）。
+- **多显示器**：仍是 macOS 合成的单个 framebuffer。客户端侧可按区域取景（整屏/左右上下半/
+  自定义，只影响显示与鼠标映射，**带宽不变**）；真正的按显示器流需要 Agent 侧逐屏采集。
 - **Apple 1105（显示几何）**：在 BetterDisplay 虚拟屏 + PointerPos + 指针移动 + 模式切换的
   真机实验中始终不发送，判定属于 Apple 高性能扩展；候选解析器仅作诊断保留，标准路径不依赖。
 - **远端光标形状仅 32bpp**：16bpp（极速）不请求光标编码，仍显示本地指针。

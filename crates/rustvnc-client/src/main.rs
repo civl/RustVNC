@@ -182,6 +182,27 @@ fn main() -> eframe::Result {
     }
 
     let _log_guard = rustvnc_client::diag::init_tracing();
+
+    // Headless check of the host half: does this bundle find its agent, start it,
+    // and read the pairing code back? Runs before the UI so it works over SSH.
+    #[cfg(target_os = "macos")]
+    if std::env::args().any(|arg| arg == "--host-selftest") {
+        println!("helper:   {:?}", rustvnc_client::host::helper_path());
+        println!("log:      {}", rustvnc_client::host::log_path().display());
+        println!("running before: {}", rustvnc_client::host::running());
+        match rustvnc_client::host::start(true) {
+            Ok(path) => println!("start ok: {}", path.display()),
+            Err(err) => println!("start err: {err}"),
+        }
+        std::thread::sleep(Duration::from_secs(5));
+        println!("running after:  {}", rustvnc_client::host::running());
+        let (code, fingerprint) = rustvnc_client::host::last_announcement();
+        println!("pairing code: {code:?}");
+        println!("fingerprint:  {fingerprint:?}");
+        rustvnc_client::host::stop();
+        println!("stopped");
+        return Ok(());
+    }
     let startup = startup_options();
     // Best-effort: the toast still appears without it, just without the app's
     // name and icon.

@@ -1,4 +1,4 @@
-//! One running client per session.
+//! One running client per user.
 //!
 //! Two copies each hold the whole `profiles.json` and `ui.json` in memory and
 //! save them wholesale, so the second one to write silently deletes whatever the
@@ -6,6 +6,10 @@
 //! second launch hand control back to the first instead of starting beside it:
 //! the second process signals "come to the front" and exits, and the first
 //! raises its window.
+//!
+//! The lock is named per *user* (`Global\…<sid>`), not per logon session: the
+//! files it protects live in the user's profile and every session of that user
+//! rewrites them, while two different users must not block each other.
 //!
 //! Enforcement is Windows-only (the product target). On other platforms
 //! [`SingleInstance::acquire`] always reports the process as primary, which keeps
@@ -71,6 +75,7 @@ impl SingleInstance {
     /// `name` is the kernel object name; keep it stable across releases, because
     /// changing it lets an old and a new build run side by side.
     pub fn acquire(name: &str) -> Self {
+        tracing::debug!("single-instance: {} (sid {:?})", name, sys_sid_for_log());
         let handle = InstanceHandle {
             raises: Arc::new(AtomicUsize::new(0)),
             waker: Arc::new(Mutex::new(None)),
@@ -80,9 +85,9 @@ impl SingleInstance {
         #[cfg(windows)]
         {
             match sys::acquire_mutex_and_event(name) {
-                sys::Acquired::Primary(mutex, event) => {
-                    let listener =
-                        spawn_listener(name.to_string(), handle.clone(), Arc::clone(&stop));
+                sys::Acquired::Primary(mutex, event, base) => {
+                    tracing::info!("single-instance: holding {base}");
+                    let listener = spawn_listener(base, handle.clone(), Arc::clone(&stop));
                     Self {
                         primary: true,
                         handle,
@@ -172,8 +177,19 @@ pub fn signal_existing(name: &str) -> bool {
     }
 }
 
+/// Diagnostics only: the SID part of the object name, so a log line explains
+/// which namespace the guard actually took.
+#[cfg(windows)]
+fn sys_sid_for_log() -> Option<String> {
+    sys::current_user_sid()
+}
+#[cfg(not(windows))]
+fn sys_sid_for_log() -> Option<String> {
+    None
+}
+
 fn spawn_listener(
-    name: String,
+    base: String,
     handle: InstanceHandle,
     stop: Arc<AtomicBool>,
 ) -> Option<JoinHandle<()>> {
@@ -184,7 +200,7 @@ fn spawn_listener(
             .spawn(move || {
                 // The listener opens its own handle to the same named event: a
                 // raw HANDLE is not `Send`, and the name is the shared identity.
-                let Some(event) = sys::open_for_waiting(&name) else {
+                let Some(event) = sys::open_for_waiting(&base) else {
                     tracing::warn!("single-instance listener could not open its event");
                     return;
                 };
@@ -204,7 +220,7 @@ fn spawn_listener(
     }
     #[cfg(not(windows))]
     {
-        let _ = (name, handle, stop);
+        let _ = (base, handle, stop);
         None
     }
 }
@@ -231,10 +247,13 @@ mod sys {
     use std::ptr;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, WAIT_OBJECT_0,
+        CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, LocalFree, WAIT_OBJECT_0,
     };
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
     use windows_sys::Win32::System::Threading::{
-        CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, OpenEventW, SetEvent, WaitForSingleObject,
+        CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, GetCurrentProcess, OpenEventW,
+        OpenProcessToken, SetEvent, WaitForSingleObject,
     };
 
     /// Owning wrapper so the handles close exactly once, on drop.
@@ -249,47 +268,118 @@ mod sys {
         }
     }
 
-    /// Mutexes and events live in the per-session namespace: the app's files are
-    /// per-user anyway, and `Global\` would let one logged-in user block another.
-    fn object_name(name: &str, suffix: &str) -> Vec<u16> {
-        OsStr::new(&format!("Local\\{name}{suffix}"))
+    fn wide(text: &str) -> Vec<u16> {
+        OsStr::new(text)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect()
     }
 
-    /// What happened when trying to take the session-wide name.
+    /// `S-1-5-21-…` for the signed-in user.
+    ///
+    /// The lock is per *user*, not per logon session: the files it protects live
+    /// in the user's profile, and every session of that user rewrites them. A SID
+    /// is the only stable identity for that — a user name collides across domains
+    /// and can be changed.
+    pub fn current_user_sid() -> Option<String> {
+        // SAFETY: every call is checked; the buffer is 8-byte aligned (so the
+        // TOKEN_USER cast is sound) and outlives the query that fills it.
+        unsafe {
+            let mut token: HANDLE = ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return None;
+            }
+            // First ask for the required size: this call fails on purpose and
+            // writes the length we must allocate.
+            let mut length = 0u32;
+            GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut length);
+            if length == 0 {
+                CloseHandle(token);
+                return None;
+            }
+            let words = (length as usize).div_ceil(std::mem::size_of::<u64>());
+            let mut buffer = vec![0u64; words];
+            let ok = GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                (words * std::mem::size_of::<u64>()) as u32,
+                &mut length,
+            );
+            CloseHandle(token);
+            if ok == 0 {
+                return None;
+            }
+            let user = &*buffer.as_ptr().cast::<TOKEN_USER>();
+            let mut text: *mut u16 = ptr::null_mut();
+            if ConvertSidToStringSidW(user.User.Sid, &mut text) == 0 {
+                return None;
+            }
+            let mut len = 0usize;
+            while *text.add(len) != 0 {
+                len += 1;
+            }
+            let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+            LocalFree(text.cast());
+            Some(sid)
+        }
+    }
+
+    /// Object names to try, most specific first.
+    ///
+    /// `Global\` plus the user's SID means every logon session of one user shares
+    /// the lock, while another user's client is unaffected. `Local\<name>` is the
+    /// fallback for a machine that refuses to create a global object.
+    pub fn candidate_bases(name: &str) -> Vec<String> {
+        match current_user_sid() {
+            Some(sid) => vec![format!("Global\\{name}.{sid}"), format!("Local\\{name}")],
+            None => vec![format!("Local\\{name}")],
+        }
+    }
+
+    /// What happened when trying to take the per-user name.
     pub enum Acquired {
-        /// We own it; both handles must stay open for the process lifetime.
-        Primary(Handle, Handle),
+        /// We own it; both handles must stay open for the process lifetime. The
+        /// string is the object base that was actually used, so the listener
+        /// opens the matching event.
+        Primary(Handle, Handle, String),
         /// Another process already owns it.
         AlreadyRunning,
-        /// The kernel refused to create the objects (resource exhaustion).
+        /// The kernel refused to create the objects in every namespace.
         Unavailable,
     }
 
     pub fn acquire_mutex_and_event(name: &str) -> Acquired {
-        let mutex_name = object_name(name, "");
-        // SAFETY: `ptr::null()` is the documented "default security" argument and
-        // the name is a NUL-terminated wide string that outlives the call.
-        let mutex = unsafe { CreateMutexW(ptr::null(), 0, mutex_name.as_ptr()) };
-        if mutex.is_null() {
-            return Acquired::Unavailable;
-        }
-        // SAFETY: reading the thread-local last error immediately after the call.
-        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-            drop(Handle(mutex));
-            return Acquired::AlreadyRunning;
-        }
+        for base in candidate_bases(name) {
+            let mutex_name = wide(&base);
+            // SAFETY: `ptr::null()` is the documented "default security" argument
+            // and the name is NUL-terminated and outlives the call.
+            let mutex = unsafe { CreateMutexW(ptr::null(), 0, mutex_name.as_ptr()) };
+            if mutex.is_null() {
+                // Global namespace refused (policy, restricted token): try Local.
+                // SAFETY: thread-local last error, read immediately.
+                let error = unsafe { GetLastError() };
+                tracing::warn!(
+                    "single-instance: cannot create {base} (error {error}); trying the next namespace"
+                );
+                continue;
+            }
+            // SAFETY: reading the thread-local last error immediately after.
+            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                drop(Handle(mutex));
+                return Acquired::AlreadyRunning;
+            }
 
-        let event_name = object_name(name, ".Activate");
-        // SAFETY: as above; auto-reset, initially unsignalled.
-        let event = unsafe { CreateEventW(ptr::null(), 0, 0, event_name.as_ptr()) };
-        if event.is_null() {
-            drop(Handle(mutex));
-            return Acquired::Unavailable;
+            let event_name = wide(&format!("{base}.Activate"));
+            // SAFETY: as above; auto-reset, initially unsignalled.
+            let event = unsafe { CreateEventW(ptr::null(), 0, 0, event_name.as_ptr()) };
+            if event.is_null() {
+                drop(Handle(mutex));
+                continue;
+            }
+            return Acquired::Primary(Handle(mutex), Handle(event), base);
         }
-        Acquired::Primary(Handle(mutex), Handle(event))
+        Acquired::Unavailable
     }
 
     /// Handle the listener waits on.
@@ -298,16 +388,16 @@ mod sys {
     /// alone does not grant `SYNCHRONIZE`, so `WaitForSingleObject` would fail on
     /// that handle. The object already exists (the primary created it before
     /// spawning the listener), so this only opens it, with full access.
-    pub fn open_for_waiting(name: &str) -> Option<Handle> {
-        let event_name = object_name(name, ".Activate");
+    pub fn open_for_waiting(base: &str) -> Option<Handle> {
+        let event_name = wide(&format!("{base}.Activate"));
         // SAFETY: null attributes, NUL-terminated name that outlives the call.
         let event = unsafe { CreateEventW(ptr::null(), 0, 0, event_name.as_ptr()) };
         (!event.is_null()).then_some(Handle(event))
     }
 
     /// Handle used to set the event; only needs `EVENT_MODIFY_STATE`.
-    fn open_for_signal(name: &str) -> Option<Handle> {
-        let event_name = object_name(name, ".Activate");
+    fn open_for_signal(base: &str) -> Option<Handle> {
+        let event_name = wide(&format!("{base}.Activate"));
         // SAFETY: same contract as above.
         let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, event_name.as_ptr()) };
         (!event.is_null()).then_some(Handle(event))
@@ -327,12 +417,18 @@ mod sys {
     }
 
     /// Signal the running instance, if one is listening.
+    ///
+    /// Both namespaces are tried: the owner may have fallen back to `Local\` if
+    /// this machine refuses global objects.
     pub fn signal(name: &str) -> bool {
-        let Some(event) = open_for_signal(name) else {
-            return false;
-        };
-        // SAFETY: `event` is an open handle for this statement.
-        unsafe { SetEvent(event.0) != 0 }
+        for base in candidate_bases(name) {
+            let Some(event) = open_for_signal(&base) else {
+                continue;
+            };
+            // SAFETY: `event` is an open handle for this statement.
+            return unsafe { SetEvent(event.0) } != 0;
+        }
+        false
     }
 }
 
@@ -344,6 +440,21 @@ mod tests {
     /// the session, and the test harness runs these in parallel.
     fn unique(test: &str) -> String {
         format!("RustVNC.Test.{}.{test}", std::process::id())
+    }
+
+    #[test]
+    fn the_lock_name_is_scoped_to_the_user() {
+        // Every Windows token carries a user SID, including SYSTEM; if this ever
+        // returns None the guard silently degrades to the per-session
+        // namespace, so it must fail loudly here instead.
+        let sid = sys::current_user_sid().expect("the current token must have a user SID");
+        assert!(sid.starts_with("S-1-5-"), "unexpected SID format: {sid}");
+        let bases = sys::candidate_bases("RustVNC.Test");
+        assert_eq!(bases[0], format!("Global\\RustVNC.Test.{sid}"));
+        assert_eq!(
+            bases[1], "Local\\RustVNC.Test",
+            "the local namespace stays as the fallback"
+        );
     }
 
     #[test]

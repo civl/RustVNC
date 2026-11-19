@@ -24,10 +24,14 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use vnc::{ClientKeyEvent, ClientMouseEvent, Rect, X11Event};
 
-/// Kernel object name for the single-instance guard.
+/// Base name for the single-instance guard.
 ///
-/// Keep it stable across releases: a new name lets an old and a new build run
-/// side by side, which is exactly the corruption the guard exists to prevent.
+/// The guard resolves it to `Global\<name>.<user sid>` and falls back to
+/// `Local\<name>` when the machine refuses global objects, so one client runs per
+/// user across logon sessions while two users never block each other.
+///
+/// Keep the base stable across releases: a new name lets an old and a new build
+/// run side by side, which is exactly the corruption the guard prevents.
 const APP_INSTANCE: &str = "RustVNC.Client";
 
 /// Command-line driven start-up behaviour, used by the soak and benchmark

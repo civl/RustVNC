@@ -2418,51 +2418,106 @@ impl App {
     fn home_ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         let lang = self.lang;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add_space(48.0);
+            ui.add_space(18.0);
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("RustVNC").size(40.0).strong());
-                ui.add_space(6.0);
+                ui.label(egui::RichText::new("RustVNC").size(26.0).strong());
                 ui.label(
                     egui::RichText::new(lang.t(
-                        "把 Mac 借过来用，就像它在你桌上",
-                        "Use your Mac as if it sat on this desk",
+                        "远程控制一台 Mac，或把这台共享出去",
+                        "Control a Mac, or share this one",
                     ))
-                    .size(16.0)
+                    .size(12.0)
                     .weak(),
                 );
-                ui.add_space(36.0);
+                ui.add_space(14.0);
 
-                let card_width = 320.0;
-                ui.columns(2, |columns| {
+                // Two compact cards, centred as a group instead of pushed to the
+                // window edges.
+                let card_width = 236.0;
+                ui.horizontal(|ui| {
+                    let total = card_width * 2.0 + 10.0;
+                    ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
                     self.home_card(
-                        &mut columns[0],
+                        ui,
                         card_width,
                         lang.t("远程控制", "Remote control"),
-                        lang.t(
-                            "连接另一台运行屏幕共享的 Mac：填地址与账号密码即可",
-                            "Connect to a Mac running Screen Sharing with its address and account",
-                        ),
-                        lang.t("连接 Mac", "Connect"),
+                        lang.t("连接运行屏幕共享的 Mac", "Connect to a Mac"),
+                        lang.t("连接", "Connect"),
                         true,
                     );
+                    ui.add_space(10.0);
                     self.home_card(
-                        &mut columns[1],
+                        ui,
                         card_width,
                         lang.t("共享本机", "Share this Mac"),
-                        lang.t(
-                            "让另一台设备控制这台 Mac（macOS 上由 RustVNC Agent 提供）",
-                            "Let another device control this Mac (served by RustVNC Agent on macOS)",
-                        ),
-                        lang.t("管理共享", "Manage sharing"),
+                        lang.t("让别人控制这台 Mac", "Let others control this Mac"),
+                        lang.t("管理", "Manage"),
                         false,
                     );
                 });
-                ui.add_space(28.0);
+
+                // Recents: the home screen should be one click away from the thing
+                // the user does every day.
+                self.home_recent(ui);
+
                 if let Some(error) = &self.error {
+                    ui.add_space(6.0);
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
                 }
             });
         });
+    }
+
+    /// Up to three recent profiles as one-click connect chips.
+    fn home_recent(&mut self, ui: &mut egui::Ui) {
+        let recent: Vec<(String, String, String)> = self
+            .profiles
+            .profiles()
+            .iter()
+            .take(3)
+            .map(|profile| {
+                (
+                    profile.id.clone(),
+                    profile.name.clone(),
+                    format!("{}:{}", profile.config.host, profile.config.port),
+                )
+            })
+            .collect();
+        if recent.is_empty() {
+            return;
+        }
+        ui.add_space(14.0);
+        ui.label(
+            egui::RichText::new(self.lang.t("最近", "Recent"))
+                .size(11.0)
+                .weak(),
+        );
+        ui.add_space(4.0);
+        let mut connect: Option<String> = None;
+        let chip_width = 176.0;
+        ui.horizontal(|ui| {
+            let total = chip_width * recent.len() as f32 + 8.0 * (recent.len() as f32 - 1.0);
+            ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+            for (id, name, detail) in &recent {
+                let label = format!("{name}\n{detail}");
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new(label).size(11.0))
+                            .min_size(egui::vec2(chip_width, 34.0)),
+                    )
+                    .on_hover_text(format!("连接到 {detail}"))
+                    .clicked()
+                {
+                    connect = Some(id.clone());
+                }
+                ui.add_space(8.0);
+            }
+        });
+        if let Some(id) = connect {
+            self.select_profile(&id);
+            self.show_home = false;
+            self.connect();
+        }
     }
 
     /// One card on the landing screen. `primary` switches to the connection
@@ -2477,19 +2532,18 @@ impl App {
         primary: bool,
     ) {
         egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::same(18))
+            .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
                 ui.set_width(width);
                 // `Frame::show` inherits the parent layout, so be explicit: the
                 // card body is a vertical block, otherwise the title, body and
                 // button all end up on one clipped line.
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new(title).size(20.0).strong());
+                    ui.label(egui::RichText::new(title).size(14.0).strong());
+                    ui.label(egui::RichText::new(body).size(11.0).weak());
                     ui.add_space(6.0);
-                    ui.label(egui::RichText::new(body).size(13.0).weak());
-                    ui.add_space(16.0);
-                    let button = egui::Button::new(egui::RichText::new(action).size(15.0).strong())
-                        .min_size(egui::vec2(width - 36.0, 38.0));
+                    let button = egui::Button::new(egui::RichText::new(action).size(12.0))
+                        .min_size(egui::vec2(width - 20.0, 24.0));
                     if ui.add(button).clicked() {
                         self.error = None;
                         if primary {

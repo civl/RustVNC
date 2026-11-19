@@ -453,6 +453,7 @@ struct App {
     autostart_enabled: bool,
     _tray: Option<TrayIcon>,
     tray_rx: Option<Receiver<TrayAction>>,
+    tray_items: Option<TrayItems>,
     quitting: bool,
     hidden_to_tray: bool,
     start_minimized: bool,
@@ -466,7 +467,16 @@ struct App {
 #[derive(Debug, Clone, Copy)]
 enum TrayAction {
     Show,
+    /// Start or stop the host service from the menu bar.
+    ToggleShare,
     Quit,
+}
+
+/// Tray menu items whose text changes while the app runs (share state, pairing
+/// code), kept so the menu can be refreshed without rebuilding it.
+struct TrayItems {
+    share: MenuItem,
+    code: MenuItem,
 }
 
 struct Tab {
@@ -664,7 +674,7 @@ impl App {
             .and_then(Lang::from_tag)
             .unwrap_or(Lang::Zh);
         let notifications = ui_state.notifications.unwrap_or(true);
-        let (tray, tray_rx) = build_tray(cc.egui_ctx.clone());
+        let (tray, tray_rx, tray_items) = build_tray(cc.egui_ctx.clone());
         let (autostart, autostart_enabled) = init_autostart();
         // A window hidden to the tray may not be repainting, so the guard's
         // listener needs a way to wake the UI when another launch asks for it.
@@ -753,10 +763,20 @@ impl App {
             autostart,
             autostart_enabled,
             _tray: tray,
+            tray_items,
             tray_rx,
             quitting: false,
             hidden_to_tray: false,
-            start_minimized: std::env::args().any(|arg| arg == "--minimized"),
+            start_minimized: {
+                let has = |flag: &str| std::env::args().any(|arg| arg == flag);
+                // Menu-bar first on macOS: no window until the user asks for it,
+                // unless this run is explicitly interactive.
+                has("--minimized")
+                    || (cfg!(target_os = "macos")
+                        && !has("--show")
+                        && !has("--screenshot")
+                        && !has("--connect"))
+            },
             update_rx: None,
             update_install_rx: None,
             update_status: String::new(),
@@ -1132,6 +1152,25 @@ impl App {
         }
     }
 
+    /// Keep the menu bar honest: the share item reflects the service state and
+    /// the next item shows the pairing code the other side has to type.
+    fn update_tray_labels(&mut self) {
+        let Some(items) = &self.tray_items else {
+            return;
+        };
+        items.share.set_text(if self.share_running {
+            "停止共享"
+        } else {
+            "共享本机"
+        });
+        let code = match (&self.share_code, self.share_running) {
+            (Some(code), true) => format!("配对码：{code}"),
+            (_, true) => "配对码：生成中…".to_string(),
+            _ => "配对码：未开启".to_string(),
+        };
+        items.code.set_text(code);
+    }
+
     fn handle_tray(&mut self, ctx: &egui::Context) {
         let Some(rx) = self.tray_rx.as_ref() else {
             return;
@@ -1149,6 +1188,13 @@ impl App {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     ctx.request_repaint();
+                }
+                TrayAction::ToggleShare => {
+                    self.show_share = true;
+                    let start = !rustvnc_client::host::running();
+                    self.share_started = true;
+                    self.toggle_share(start);
+                    self.update_tray_labels();
                 }
                 TrayAction::Quit => {
                     self.quitting = true;
@@ -3419,6 +3465,10 @@ impl eframe::App for App {
         self.poll_raise_request(ctx);
         self.run_pending_connect();
         self.start_share_if_requested();
+        if self.share_checked.elapsed() > Duration::from_secs(2) {
+            self.refresh_share_state();
+            self.update_tray_labels();
+        }
         self.poll_host_key_probe();
         if self.host_key_probe_rx.is_some() {
             // An idle window is not repainted by egui, so a finished probe would
@@ -3798,25 +3848,46 @@ fn init_autostart() -> (Option<AutoLaunch>, bool) {
         .set_app_path(&path)
         .set_args(&["--minimized"]);
     let auto = builder.build().ok();
-    let enabled = auto
+    #[allow(unused_mut)]
+    let mut enabled = auto
         .as_ref()
         .and_then(|auto| auto.is_enabled().ok())
         .unwrap_or(false);
+    // A menu-bar utility that is installed (not a dev build) should survive a
+    // reboot; the settings checkbox still lets the user turn it off.
+    #[cfg(target_os = "macos")]
+    if !enabled && path.contains("/Applications/") {
+        if let Some(auto) = auto.as_ref() {
+            if auto.enable().is_ok() {
+                enabled = true;
+            }
+        }
+    }
     (auto, enabled)
 }
 
-fn build_tray(ctx: egui::Context) -> (Option<TrayIcon>, Option<Receiver<TrayAction>>) {
+fn build_tray(
+    ctx: egui::Context,
+) -> (
+    Option<TrayIcon>,
+    Option<Receiver<TrayAction>>,
+    Option<TrayItems>,
+) {
     let menu = Menu::new();
     let show = MenuItem::with_id("show", "显示 RustVNC", true, None);
+    let share = MenuItem::with_id("share", "共享本机", true, None);
+    let code = MenuItem::with_id("code", "配对码：未开启", false, None);
     let quit = MenuItem::with_id("quit", "退出", true, None);
     if menu.append(&show).is_err()
+        || menu.append(&share).is_err()
+        || menu.append(&code).is_err()
         || menu.append(&PredefinedMenuItem::separator()).is_err()
         || menu.append(&quit).is_err()
     {
-        return (None, None);
+        return (None, None, None);
     }
     let Some(icon) = make_tray_icon() else {
-        return (None, None);
+        return (None, None, None);
     };
     let tray = match TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -3827,7 +3898,7 @@ fn build_tray(ctx: egui::Context) -> (Option<TrayIcon>, Option<Receiver<TrayActi
         Ok(tray) => tray,
         Err(err) => {
             eprintln!("tray icon unavailable: {err}");
-            return (None, None);
+            return (None, None, None);
         }
     };
 
@@ -3837,6 +3908,7 @@ fn build_tray(ctx: egui::Context) -> (Option<TrayIcon>, Option<Receiver<TrayActi
         while let Ok(event) = MenuEvent::receiver().recv() {
             let action = match event.id().as_ref() {
                 "show" => Some(TrayAction::Show),
+                "share" => Some(TrayAction::ToggleShare),
                 "quit" => Some(TrayAction::Quit),
                 _ => None,
             };
@@ -3853,7 +3925,7 @@ fn build_tray(ctx: egui::Context) -> (Option<TrayIcon>, Option<Receiver<TrayActi
             }
         }
     });
-    (Some(tray), Some(rx))
+    (Some(tray), Some(rx), Some(TrayItems { share, code }))
 }
 
 fn make_tray_icon() -> Option<Icon> {

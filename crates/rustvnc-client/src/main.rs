@@ -45,6 +45,8 @@ struct StartupOptions {
     bench_seconds: Option<f64>,
     /// Where to write the frame-cadence summary.
     bench_out: Option<std::path::PathBuf>,
+    /// Grab the UI once (in-app screenshot) and exit: `--screenshot <path>`.
+    screenshot: Option<std::path::PathBuf>,
 }
 
 fn startup_options() -> StartupOptions {
@@ -55,6 +57,7 @@ fn startup_options() -> StartupOptions {
             "--connect" => options.connect = args.next(),
             "--bench-frames" => options.bench_seconds = args.next().and_then(|v| v.parse().ok()),
             "--bench-out" => options.bench_out = args.next().map(std::path::PathBuf::from),
+            "--screenshot" => options.screenshot = args.next().map(std::path::PathBuf::from),
             _ => {}
         }
     }
@@ -310,6 +313,12 @@ struct App {
     /// client can send real transitions instead of re-deriving them per key,
     /// which is what makes Ctrl+click and Shift+drag work.
     sent_modifiers: ModifierState,
+    /// `--screenshot`: capture the UI once and exit.
+    screenshot_path: Option<std::path::PathBuf>,
+    screenshot_requested: bool,
+    screenshot_started: Instant,
+    /// Show the two-card landing screen instead of the connection form.
+    show_home: bool,
     /// `--connect`: profile to select and connect to on the first frame.
     pending_connect: Option<String>,
     /// Physical size of the monitor this window is on, used by the Auto
@@ -641,6 +650,10 @@ impl App {
             session_fps: 0.0,
             first_frame_logged: false,
             session_idle: false,
+            screenshot_path: startup.screenshot.clone(),
+            screenshot_requested: false,
+            screenshot_started: Instant::now(),
+            show_home: true,
             pending_connect: startup.connect.clone(),
             bench: startup.bench_seconds.map(|seconds| {
                 let now = Instant::now();
@@ -1977,6 +1990,170 @@ impl App {
         ui.set_clip_rect(clip);
     }
 
+    /// `--screenshot <path>`: let the UI settle, grab it through egui's own
+    /// screenshot command and exit. This is how UI changes get verified without
+    /// fighting the desktop compositor (a window that is merely *behind* another
+    /// one looks blank to `CopyFromScreen`).
+    fn run_screenshot(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.screenshot_path.clone() else {
+            return;
+        };
+        // Let fonts, layout and the first frames settle.
+        if !self.screenshot_requested {
+            if self.screenshot_started.elapsed() < Duration::from_millis(1500) {
+                ctx.request_repaint();
+                return;
+            }
+            self.screenshot_requested = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            tracing::info!("screenshot requested");
+            ctx.request_repaint();
+            return;
+        }
+
+        let image = ctx.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        let Some(image) = image else {
+            // The screenshot arrives as an event on a later frame.
+            ctx.request_repaint();
+            return;
+        };
+        let (width, height) = (image.size[0] as u32, image.size[1] as u32);
+        let pixels: Vec<u8> = image
+            .pixels
+            .iter()
+            .flat_map(|color| color.to_array())
+            .collect();
+        match image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8) {
+            Ok(()) => println!("screenshot written: {} ({width}x{height})", path.display()),
+            Err(err) => eprintln!("screenshot failed: {err}"),
+        }
+        std::process::exit(0);
+    }
+
+    /// Landing screen: two cards, like RustDesk — "control a Mac" or "share this
+    /// Mac". It is the whole first screen; the connection form only appears once
+    /// the user picked a direction.
+    fn home_ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+        let lang = self.lang;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add_space(48.0);
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new("RustVNC").size(40.0).strong());
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(lang.t(
+                        "把 Mac 借过来用，就像它在你桌上",
+                        "Use your Mac as if it sat on this desk",
+                    ))
+                    .size(16.0)
+                    .weak(),
+                );
+                ui.add_space(36.0);
+
+                let card_width = 320.0;
+                ui.columns(2, |columns| {
+                    self.home_card(
+                        &mut columns[0],
+                        card_width,
+                        lang.t("远程控制", "Remote control"),
+                        lang.t(
+                            "连接另一台运行屏幕共享的 Mac：填地址与账号密码即可",
+                            "Connect to a Mac running Screen Sharing with its address and account",
+                        ),
+                        lang.t("连接 Mac", "Connect"),
+                        true,
+                    );
+                    self.home_card(
+                        &mut columns[1],
+                        card_width,
+                        lang.t("共享本机", "Share this Mac"),
+                        lang.t(
+                            "让另一台设备控制这台 Mac（macOS 上由 RustVNC Agent 提供）",
+                            "Let another device control this Mac (served by RustVNC Agent on macOS)",
+                        ),
+                        lang.t("管理共享", "Manage sharing"),
+                        false,
+                    );
+                });
+                ui.add_space(28.0);
+                if let Some(error) = &self.error {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                }
+            });
+        });
+    }
+
+    /// One card on the landing screen. `primary` switches to the connection
+    /// form; the other opens the local-sharing panel.
+    fn home_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        width: f32,
+        title: &str,
+        body: &str,
+        action: &str,
+        primary: bool,
+    ) {
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(18))
+            .show(ui, |ui| {
+                ui.set_width(width);
+                // `Frame::show` inherits the parent layout, so be explicit: the
+                // card body is a vertical block, otherwise the title, body and
+                // button all end up on one clipped line.
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new(title).size(20.0).strong());
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(body).size(13.0).weak());
+                    ui.add_space(16.0);
+                    let button = egui::Button::new(egui::RichText::new(action).size(15.0).strong())
+                        .min_size(egui::vec2(width - 36.0, 38.0));
+                    if ui.add(button).clicked() {
+                        self.error = None;
+                        if primary {
+                            self.show_home = false;
+                        } else {
+                            self.open_sharing_panel();
+                        }
+                    }
+                });
+            });
+    }
+
+    /// "Share this Mac": on macOS the agent bundle owns the service, so offer to
+    /// open it and say whether it is already running. Elsewhere this build is the
+    /// controller only, and the card says so instead of pretending.
+    fn open_sharing_panel(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            let running = std::process::Command::new("pgrep")
+                .args(["-f", "rustvnc-agent"])
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false);
+            self.status = if running {
+                "RustVNC Agent 正在运行：在 Mac 菜单栏查看配对码".to_string()
+            } else {
+                "正在打开 RustVNC Agent…".to_string()
+            };
+            let _ = std::process::Command::new("open")
+                .args(["-a", "RustVNC Agent"])
+                .status();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.error = Some(
+                "这台机器是控制端；要让别人控制它，需要在 Mac 上安装 RustVNC Agent 并用配对码连接。"
+                    .to_string(),
+            );
+        }
+    }
+
     fn form_ui(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         ui.heading(lang.t("连接", "Connection"));
@@ -2957,6 +3134,7 @@ impl App {
         match found {
             Some(id) => {
                 self.select_profile(&id);
+                self.show_home = false;
                 self.connect();
                 tracing::info!("--connect: started session for profile {id}");
             }
@@ -3053,6 +3231,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         self.run_frame_bench(ctx);
+        self.run_screenshot(ctx);
         self.handle_tray(ctx);
         self.poll_update(ctx);
         if self.start_minimized && self._tray.is_some() {
@@ -3118,15 +3297,20 @@ impl eframe::App for App {
                         }
                     });
                 });
-                self.tab_bar(ui);
+                if !self.show_home {
+                    self.tab_bar(ui);
+                }
             });
 
-            egui::SidePanel::left("profiles")
-                .resizable(true)
-                .default_width(280.0)
-                .show(ctx, |ui| {
-                    self.left_panel(ui, ctx);
-                });
+            // The landing screen is self-contained: no profile list, no tabs.
+            if !self.show_home {
+                egui::SidePanel::left("profiles")
+                    .resizable(true)
+                    .default_width(280.0)
+                    .show(ctx, |ui| {
+                        self.left_panel(ui, ctx);
+                    });
+            }
 
             egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -3189,6 +3373,8 @@ impl eframe::App for App {
         panel.show(ctx, |ui| {
             if self.session.is_some() {
                 self.session_ui(ui, ctx, !immersive);
+            } else if self.show_home {
+                self.home_ui(ui, ctx);
             } else {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     self.form_ui(ui);

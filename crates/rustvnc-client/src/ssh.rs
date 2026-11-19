@@ -1,7 +1,8 @@
 use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,21 @@ pub struct SshTunnel {
 
 impl SshTunnel {
     pub fn start(ssh: &SshConfig, vnc_host: &str, vnc_port: u16) -> Result<Self> {
+        Self::start_with_cancel(ssh, vnc_host, vnc_port, &AtomicBool::new(false))
+    }
+
+    /// Like [`Self::start`], but abandons the wait as soon as `cancel` is set.
+    ///
+    /// Both the host-key check and the forwarded-port wait used to run on the
+    /// UI thread, so pressing Connect could freeze the window for the whole
+    /// deadline. This now runs on the session worker; the flag lets a tab that
+    /// is closed mid-handshake stop within one poll tick instead of ten seconds.
+    pub fn start_with_cancel(
+        ssh: &SshConfig,
+        vnc_host: &str,
+        vnc_port: u16,
+        cancel: &AtomicBool,
+    ) -> Result<Self> {
         if ssh.user.trim().is_empty() {
             bail!("SSH 用户名不能为空 (SSH user is required)");
         }
@@ -56,6 +72,11 @@ impl SshTunnel {
 
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("已取消 SSH 隧道启动 (cancelled)");
+            }
             if TcpStream::connect(&local_addr).is_ok() {
                 return Ok(Self { child, local_addr });
             }
@@ -238,6 +259,54 @@ pub fn host_key_known(path: &Path, host: &str, port: u16) -> bool {
     })
 }
 
+/// How long `ssh-keyscan` may take end to end.
+///
+/// `-T 5` bounds one connection attempt, but the scan can open several (one per
+/// key type, plus an IPv6 fallback), and `Command::output()` has no deadline at
+/// all: a silently dropped SYN used to block the caller indefinitely.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Run `command`, collect its output, and kill it after `limit`.
+///
+/// `Command::output()` blocks until the child exits, which is exactly the wrong
+/// primitive for a network probe: a filtered port produces no output and no
+/// exit, so the UI thread sat in `read()` with nothing to cancel it.
+fn output_with_timeout(program: &str, command: &mut Command, limit: Duration) -> Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("运行 {program} 失败（OpenSSH 未安装？）"))?;
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err).with_context(|| format!("等待 {program} 失败"));
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().context("收集 ssh 输出")?;
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            bail!(
+                "{program} 在 {} 秒内没有返回{}",
+                limit.as_secs(),
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!("：{stderr}")
+                }
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    child.wait_with_output().context("收集 ssh 输出")
+}
+
 /// Fetch the host key over the network and render its fingerprint.
 ///
 /// Nothing is trusted at this point: the caller shows the fingerprint to the
@@ -246,14 +315,14 @@ pub fn probe_host_key(host: &str, port: u16) -> Result<HostKeyProbe> {
     if host.trim().is_empty() {
         bail!("主机地址为空 (host is empty)");
     }
-    let output = Command::new(keyscan_binary())
-        .arg("-p")
+    let program = keyscan_binary();
+    let mut scan = Command::new(&program);
+    scan.arg("-p")
         .arg(port.to_string())
         .arg("-T")
         .arg("5")
-        .arg(host)
-        .output()
-        .with_context(|| format!("运行 {} 失败（OpenSSH 未安装？）", keyscan_binary()))?;
+        .arg(host);
+    let output = output_with_timeout(&program, &mut scan, PROBE_TIMEOUT)?;
     let known_hosts = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if known_hosts.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -536,5 +605,68 @@ mod tests {
             !message.contains("\n\n"),
             "stderr should be trimmed: {message:?}"
         );
+    }
+
+    /// A shell command that finishes: its output must be collected normally.
+    #[test]
+    fn command_output_is_collected() {
+        let mut command = echo_command("hello");
+        let output = output_with_timeout("echo", &mut command, Duration::from_secs(5))
+            .expect("a fast command must succeed");
+        assert!(output.status.success(), "status: {:?}", output.status);
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    /// A command that never returns must be killed at the deadline. This is the
+    /// property `Command::output()` does not offer, and the reason a filtered
+    /// SSH port used to freeze the caller.
+    #[test]
+    fn command_is_killed_after_the_deadline() {
+        let mut command = hanging_command();
+        let started = Instant::now();
+        let result = output_with_timeout("sleeper", &mut command, Duration::from_millis(400));
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "a hanging command must time out");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "the deadline must be enforced, took {elapsed:?}"
+        );
+        assert!(
+            format!("{:#}", result.unwrap_err()).contains("没有返回"),
+            "the error should say the command timed out"
+        );
+    }
+
+    fn echo_command(text: &str) -> Command {
+        #[cfg(windows)]
+        {
+            let mut command = Command::new("cmd");
+            command.args(["/C", &format!("echo {text}")]);
+            command
+        }
+        #[cfg(not(windows))]
+        {
+            let mut command = Command::new("sh");
+            command.args(["-c", &format!("echo {text}")]);
+            command
+        }
+    }
+
+    fn hanging_command() -> Command {
+        // A single process, not `cmd /C ping …`: killing a shell leaves the
+        // grandchild holding the pipe, and the collector would then wait for the
+        // grandchild anyway.
+        #[cfg(windows)]
+        {
+            let mut command = Command::new("ping");
+            command.args(["-n", "10", "127.0.0.1"]);
+            command
+        }
+        #[cfg(not(windows))]
+        {
+            let mut command = Command::new("sleep");
+            command.arg("10");
+            command
+        }
     }
 }

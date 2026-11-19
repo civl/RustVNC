@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -135,20 +137,20 @@ pub struct Session {
     events: Receiver<SessionEvent>,
     thread: Option<JoinHandle<()>>,
     local_addr: String,
-    _tunnel: Option<SshTunnel>,
+    /// Set by [`Session::close`] so a worker blocked in SSH startup (up to ten
+    /// seconds of polling) abandons it instead of outliving the closed tab.
+    cancel: Arc<AtomicBool>,
 }
 
 impl Session {
     pub fn start(config: ClientConfig, password: String) -> Result<Self> {
-        let (target, tunnel) = match config.security {
-            SecurityMode::Direct => (format!("{}:{}", config.host, config.port), None),
-            SecurityMode::Ssh => {
-                let tunnel = SshTunnel::start(&config.ssh, &config.host, config.port)?;
-                (tunnel.local_addr().to_string(), Some(tunnel))
-            }
-        };
+        // Nothing here may touch the network. Starting an SSH tunnel spawns
+        // `ssh` and waits for the forwarded port, and this runs on the UI
+        // thread: doing that work here is what froze the window on Connect.
+        let local_addr = format!("{}:{}", config.host, config.port);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_thread = Arc::clone(&cancel);
 
-        let target_for_thread = target.clone();
         let (command_tx, command_rx) = unbounded_channel();
         let (event_tx, event_rx) = mpsc::channel();
         let thread = thread::Builder::new()
@@ -169,11 +171,11 @@ impl Session {
                     }
                 };
                 runtime.block_on(run_session(
-                    target_for_thread,
                     config,
                     password,
                     command_rx,
                     event_tx,
+                    cancel_for_thread,
                 ));
             })
             .context("spawn session thread")?;
@@ -182,8 +184,8 @@ impl Session {
             commands: command_tx,
             events: event_rx,
             thread: Some(thread),
-            local_addr: target,
-            _tunnel: tunnel,
+            local_addr,
+            cancel,
         })
     }
 
@@ -210,6 +212,9 @@ impl Session {
     /// long as that network call takes. The handle is detached instead; the
     /// worker exits on its own once its current await completes or times out.
     pub fn close(&mut self) {
+        // Release the worker before the Close command can be observed: it may be
+        // sitting in the SSH startup poll, which only checks this flag.
+        self.cancel.store(true, Ordering::Relaxed);
         let _ = self.commands.send(SessionCommand::Close);
         if let Some(thread) = self.thread.take() {
             drop(thread);
@@ -367,15 +372,43 @@ impl FramePacer {
     }
 }
 async fn run_session(
-    target: String,
     config: ClientConfig,
     password: String,
     mut commands: UnboundedReceiver<SessionCommand>,
     events: Sender<SessionEvent>,
+    cancel: Arc<AtomicBool>,
 ) {
+    // Opening the tunnel spawns `ssh` and polls for the forwarded port, so it
+    // belongs on this worker thread: the caller only spawns a thread and
+    // returns, which is what keeps Connect from freezing the window. The
+    // binding lives for the whole session — dropping it kills the ssh child.
+    let tunnel = match open_tunnel(&config, &cancel) {
+        Ok(tunnel) => tunnel,
+        // Closed while `ssh` was still starting: not an error the user asked to
+        // see, and there is nobody left to show it to.
+        Err(_) if cancel.load(Ordering::Relaxed) => return,
+        Err(failure) => {
+            let _ = events.send(SessionEvent::Error {
+                code: failure.code,
+                message: failure.message,
+                retryable: false,
+            });
+            let _ = events.send(SessionEvent::Closed);
+            return;
+        }
+    };
+    let target = match &tunnel {
+        Some(tunnel) => tunnel.local_addr().to_string(),
+        None => format!("{}:{}", config.host, config.port),
+    };
+
     let mut attempt = 0u32;
     let mut paused = false;
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = events.send(SessionEvent::Closed);
+            break;
+        }
         let started = Instant::now();
         match connect_and_loop(
             target.clone(),
@@ -423,6 +456,23 @@ async fn run_session(
             }
         }
     }
+}
+
+/// Open the SSH tunnel when the profile asks for one.
+///
+/// Called from [`run_session`], i.e. on the worker thread. A tunnel failure is
+/// not retryable: the usual causes (missing host key, wrong user, no `ssh`) do
+/// not fix themselves, and retrying would hide the message behind a backoff.
+fn open_tunnel(
+    config: &ClientConfig,
+    cancel: &AtomicBool,
+) -> std::result::Result<Option<SshTunnel>, SessionFailure> {
+    if !matches!(config.security, SecurityMode::Ssh) {
+        return Ok(None);
+    }
+    SshTunnel::start_with_cancel(&config.ssh, &config.host, config.port, cancel)
+        .map(Some)
+        .map_err(|err| SessionFailure::new(SessionErrorCode::Network, format!("{err:#}"), false))
 }
 
 fn backoff(attempt: u32) -> Duration {

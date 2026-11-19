@@ -261,6 +261,12 @@ struct App {
     /// Host key fetched for the current form, waiting for the user to compare
     /// the fingerprint and pin it.
     host_key_probe: Option<HostKeyProbe>,
+    /// Receive side of a host-key probe that is running on its own thread;
+    /// `Some` means one is in flight.
+    ///
+    /// `ssh-keyscan` can stall for seconds on a filtered port, so it must never
+    /// be called from `update()` — that is the freeze this channel removes.
+    host_key_probe_rx: Option<std::sync::mpsc::Receiver<Result<ssh::HostKeyProbe, String>>>,
     /// Multi-line, user-facing note that is not an error (e.g. the public key
     /// to install on the Mac).
     info: Option<String>,
@@ -508,6 +514,7 @@ impl App {
             fullscreen: false,
             fullscreen_hint: None,
             host_key_probe: None,
+            host_key_probe_rx: None,
             info: None,
             agent: None,
             agent_status: String::new(),
@@ -553,6 +560,7 @@ impl App {
                 .flatten()
                 .unwrap_or_default();
             self.host_key_probe = None;
+            self.host_key_probe_rx = None;
             self.error = None;
             self.status = "Ready".to_string();
         }
@@ -887,18 +895,59 @@ impl App {
 
     /// Fetch the host key and show its SHA256 fingerprint. Nothing is trusted
     /// until the user confirms it and [`Self::trust_host_key`] runs.
+    ///
+    /// The scan itself runs on a worker thread: `ssh-keyscan` opens network
+    /// connections, and calling it from `update()` blocked the whole window for
+    /// as long as the scan took (seconds, and unbounded on a filtered port).
+    /// [`Self::poll_host_key_probe`] collects the result.
     fn probe_host_key(&mut self) {
+        if self.host_key_probe_rx.is_some() {
+            return;
+        }
         let host = self.draft.config.host.clone();
         let port = self.draft.config.ssh.port;
-        match ssh::probe_host_key(&host, port) {
-            Ok(probe) => {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("rustvnc-host-key-probe".to_string())
+            .spawn(move || {
+                let result = ssh::probe_host_key(&host, port).map_err(|err| format!("{err:#}"));
+                let _ = tx.send(result);
+            });
+        match spawned {
+            Ok(_) => {
+                self.host_key_probe_rx = Some(rx);
+                self.host_key_probe = None;
+                self.error = None;
+                self.status = "正在探测主机密钥…".to_string();
+            }
+            Err(err) => self.error = Some(format!("无法启动探测线程：{err}")),
+        }
+    }
+
+    /// Collect a finished host-key probe, if one is in flight.
+    fn poll_host_key_probe(&mut self) {
+        let Some(rx) = self.host_key_probe_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(probe)) => {
+                let host = self.draft.config.host.clone();
+                let port = self.draft.config.ssh.port;
                 self.status = format!("已获取 {host}:{port} 的主机密钥，请核对指纹");
                 self.host_key_probe = Some(probe);
                 self.error = None;
             }
-            Err(err) => {
+            Ok(Err(message)) => {
                 self.host_key_probe = None;
-                self.error = Some(format!("{err:#}"));
+                self.error = Some(message);
+                self.status = "主机密钥探测失败".to_string();
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.host_key_probe_rx = Some(rx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.host_key_probe = None;
+                self.error = Some("主机密钥探测线程意外结束".to_string());
             }
         }
     }
@@ -1908,8 +1957,18 @@ impl App {
 
                     ui.label(lang.t("主机密钥", "Host key"));
                     ui.horizontal(|ui| {
-                        if ui.button(lang.t("探测指纹", "Fetch fingerprint")).clicked() {
+                        let probing = self.host_key_probe_rx.is_some();
+                        if ui
+                            .add_enabled(
+                                !probing,
+                                egui::Button::new(lang.t("探测指纹", "Fetch fingerprint")),
+                            )
+                            .clicked()
+                        {
                             self.probe_host_key();
+                        }
+                        if probing {
+                            ui.spinner();
                         }
                         if ui
                             .add_enabled(
@@ -2527,6 +2586,12 @@ impl eframe::App for App {
             }
         }
         self.run_pending_connect();
+        self.poll_host_key_probe();
+        if self.host_key_probe_rx.is_some() {
+            // An idle window is not repainted by egui, so a finished probe would
+            // sit in the channel until the user moved the mouse.
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         self.run_frame_bench(ctx);
         self.handle_tray(ctx);
         self.poll_update(ctx);

@@ -21,6 +21,11 @@ use std::thread::JoinHandle;
 
 /// How long the listener sleeps before re-checking its stop flag, so shutdown
 /// does not depend on receiving one more event.
+///
+/// Windows-only: the listener only exists there, and an unconditional constant
+/// is dead code on every other target (which is what failed the macOS clippy
+/// job on the first push).
+#[cfg(windows)]
 const POLL_INTERVAL_MS: u32 = 250;
 
 type Waker = Box<dyn Fn() + Send + Sync>;

@@ -193,41 +193,38 @@ fn sys_sid_for_log() -> Option<String> {
     None
 }
 
+/// Watch the activation event on a background thread.
+///
+/// Windows-only: nothing else creates a listener, so an unconditional function
+/// is dead code on other targets — which is what the macOS clippy job caught.
+#[cfg(windows)]
 fn spawn_listener(
     base: String,
     handle: InstanceHandle,
     stop: Arc<AtomicBool>,
 ) -> Option<JoinHandle<()>> {
-    #[cfg(windows)]
-    {
-        std::thread::Builder::new()
-            .name("rustvnc-single-instance".to_string())
-            .spawn(move || {
-                // The listener opens its own handle to the same named event: a
-                // raw HANDLE is not `Send`, and the name is the shared identity.
-                let Some(event) = sys::open_for_waiting(&base) else {
-                    tracing::warn!("single-instance listener could not open its event");
-                    return;
-                };
-                while !stop.load(Ordering::Relaxed) {
-                    if sys::wait(&event, POLL_INTERVAL_MS) {
-                        handle.raises.fetch_add(1, Ordering::Relaxed);
-                        if let Ok(slot) = handle.waker.lock()
-                            && let Some(wake) = slot.as_ref()
-                        {
-                            wake();
-                        }
+    std::thread::Builder::new()
+        .name("rustvnc-single-instance".to_string())
+        .spawn(move || {
+            // The listener opens its own handle to the same named event: a
+            // raw HANDLE is not `Send`, and the name is the shared identity.
+            let Some(event) = sys::open_for_waiting(&base) else {
+                tracing::warn!("single-instance listener could not open its event");
+                return;
+            };
+            while !stop.load(Ordering::Relaxed) {
+                if sys::wait(&event, POLL_INTERVAL_MS) {
+                    handle.raises.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(slot) = handle.waker.lock()
+                        && let Some(wake) = slot.as_ref()
+                    {
+                        wake();
                     }
                 }
-            })
-            .map_err(|err| tracing::warn!("spawn single-instance listener: {err}"))
-            .ok()
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (base, handle, stop);
-        None
-    }
+            }
+        })
+        .map_err(|err| tracing::warn!("spawn single-instance listener: {err}"))
+        .ok()
 }
 
 impl Drop for SingleInstance {

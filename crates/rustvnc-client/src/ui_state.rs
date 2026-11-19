@@ -36,6 +36,8 @@ pub struct UiState {
     pub window: WindowState,
     /// `zh` / `en`; absent keeps the built-in default.
     pub lang: Option<String>,
+    /// Desktop notifications; absent means on.
+    pub notifications: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -168,6 +170,7 @@ mod tests {
                 maximized: false,
             },
             lang: Some("en".into()),
+            notifications: Some(false),
         };
         state.save(&path).unwrap();
 
@@ -175,6 +178,7 @@ mod tests {
         assert_eq!(reloaded.tabs, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(reloaded.active, Some(1));
         assert_eq!(reloaded.lang.as_deref(), Some("en"));
+        assert_eq!(reloaded.notifications, Some(false));
         assert_eq!(reloaded.window.inner_size(), Some([1440.0, 900.0]));
         assert_eq!(reloaded.window.position(), Some([120.0, 80.0]));
     }

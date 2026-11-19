@@ -14,6 +14,7 @@ use rustvnc_client::config::{
 };
 use rustvnc_client::credentials::CredentialStore;
 use rustvnc_client::input::{key_to_keysym, text_to_keysyms};
+use rustvnc_client::notify::{self, Kind as NotifyKind, Notifier};
 use rustvnc_client::profiles::{Profile, ProfileStore};
 use rustvnc_client::session::{Session, SessionEvent};
 use rustvnc_client::single_instance::{self, InstanceHandle, SingleInstance};
@@ -155,6 +156,22 @@ fn main() -> eframe::Result {
 
     let _log_guard = rustvnc_client::diag::init_tracing();
     let startup = startup_options();
+    // Best-effort: the toast still appears without it, just without the app's
+    // name and icon.
+    notify::ensure_registered();
+
+    // One-shot self-test: `--test-notification` proves the toast path end to end
+    // (AUMID registration included) without needing a disconnect. Runs before the
+    // single-instance guard so it works while the app is open.
+    if std::env::args().any(|arg| arg == "--test-notification") {
+        notify::show_now(
+            "RustVNC",
+            "测试通知：看到这条说明系统通知是通的 (test notification)",
+        );
+        // Give the shell a moment to take ownership of the toast.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        return Ok(());
+    }
 
     // One client per session. Two copies hold their own in-memory `profiles.json`
     // and `ui.json` and save them wholesale, so the later writer silently drops
@@ -356,6 +373,11 @@ struct App {
     instance: InstanceHandle,
     /// Last raise count the UI has handled.
     raise_seen: usize,
+    /// Desktop notifications for events the user is not looking at.
+    notifier: Notifier,
+    /// Whether the current outage has already produced its "reconnecting" toast,
+    /// and whether `Connected` therefore means "back online".
+    was_reconnecting: bool,
     /// The workspace as it was restored, kept up to date with the window
     /// geometry so [`Self::persist_ui`] can write the whole thing back.
     ui_state: UiState,
@@ -574,6 +596,7 @@ impl App {
             .as_deref()
             .and_then(Lang::from_tag)
             .unwrap_or(Lang::Zh);
+        let notifications = ui_state.notifications.unwrap_or(true);
         let (tray, tray_rx) = build_tray(cc.egui_ctx.clone());
         let (autostart, autostart_enabled) = init_autostart();
         // A window hidden to the tray may not be repainting, so the guard's
@@ -645,6 +668,8 @@ impl App {
             ui_state_path: UiState::default_path(),
             instance,
             raise_seen: 0,
+            notifier: Notifier::new(notifications),
+            was_reconnecting: false,
             autostart,
             autostart_enabled,
             _tray: tray,
@@ -658,6 +683,24 @@ impl App {
             available_update: None,
             show_update: false,
         }
+    }
+
+    /// Toasts are for when the user is not looking: skip them while the window is
+    /// focused. A tray-hidden window is never focused, but checking the flag
+    /// first keeps the intent explicit.
+    fn should_notify(&self, ctx: &egui::Context) -> bool {
+        self.hidden_to_tray || !ctx.input(|input| input.focused)
+    }
+
+    /// Show a toast if the user is not looking at the window.
+    ///
+    /// [`Notifier`] owns the per-kind cooldown: the reconnect ladder emits one
+    /// `Reconnecting` per attempt, which must not stack up in the Action Center.
+    fn notify_user(&mut self, ctx: &egui::Context, kind: NotifyKind, title: &str, body: &str) {
+        if !self.should_notify(ctx) {
+            return;
+        }
+        self.notifier.notify(kind, title, body, Instant::now());
     }
 
     /// Bring the window forward when another launch asked for it.
@@ -713,6 +756,7 @@ impl App {
         self.ui_state.tabs = self.tabs.iter().map(|tab| tab.profile.id.clone()).collect();
         self.ui_state.active = self.active_tab;
         self.ui_state.lang = Some(self.lang.tag().to_string());
+        self.ui_state.notifications = Some(self.notifier.enabled());
         if let Err(err) = self.ui_state.save(&self.ui_state_path) {
             tracing::warn!("save {}: {err:#}", self.ui_state_path.display());
         }
@@ -905,10 +949,16 @@ impl App {
         if let Some(rx) = &self.update_rx {
             match rx.try_recv() {
                 Ok(Ok(Some(info))) => {
-                    self.update_status = format!("发现新版本 {}", info.version);
+                    let version = info.version.clone();
+                    self.update_status = format!("发现新版本 {version}");
                     self.show_update = true;
                     self.available_update = Some(info);
                     self.update_rx = None;
+                    let body = format!(
+                        "{} {version}",
+                        self.lang.t("发现新版本", "Update available")
+                    );
+                    self.notify_user(ctx, NotifyKind::UpdateAvailable, "RustVNC", &body);
                 }
                 Ok(Ok(None)) => {
                     self.update_status = format!("已是最新版本 {}", update::current_version());
@@ -1216,6 +1266,8 @@ impl App {
 
     fn connect(&mut self) {
         self.save_profile();
+        // A fresh connect starts a new outage history.
+        self.was_reconnecting = false;
         if self.draft.config.security == SecurityMode::Ssh {
             if self.draft.config.ssh.user.trim().is_empty() {
                 self.error = Some("SSH 用户名不能为空 (SSH user is required)".to_string());
@@ -1568,6 +1620,11 @@ impl App {
         for event in events {
             match event {
                 SessionEvent::Connected { name, bpp, .. } => {
+                    if self.was_reconnecting {
+                        self.was_reconnecting = false;
+                        let body = self.lang.t("已重新连接", "Reconnected");
+                        self.notify_user(ctx, NotifyKind::Reconnected, "RustVNC", body);
+                    }
                     self.status = format!("Connected: {name}");
                     self.error = None;
                     self.frame.bpp = bpp;
@@ -1666,11 +1723,22 @@ impl App {
                     if !retryable || !self.draft.config.auto_reconnect {
                         self.status = "Disconnected".to_string();
                         closed = true;
+                        self.was_reconnecting = false;
+                        let title = self.lang.t("连接已断开", "Disconnected");
+                        self.notify_user(ctx, NotifyKind::Disconnected, title, &message);
                     } else {
                         self.status = "Waiting to reconnect…".to_string();
                     }
                 }
                 SessionEvent::Reconnecting { attempt, delay_ms } => {
+                    // One toast per outage, not one per backoff attempt.
+                    if !self.was_reconnecting {
+                        self.was_reconnecting = true;
+                        let body = self
+                            .lang
+                            .t("连接中断，正在重试…", "Connection lost, retrying…");
+                        self.notify_user(ctx, NotifyKind::Reconnecting, "RustVNC", body);
+                    }
                     self.status = format!(
                         "Connection lost; retry #{attempt} in {:.1}s",
                         delay_ms as f64 / 1000.0
@@ -1684,6 +1752,7 @@ impl App {
         if closed {
             self.session = None;
             self.status = "Disconnected".to_string();
+            self.was_reconnecting = false;
         }
     }
 
@@ -1983,6 +2052,23 @@ impl App {
                     .changed()
                 {
                     self.set_autostart(autostart);
+                }
+                ui.end_row();
+
+                ui.label(lang.t("系统通知", "Notifications"));
+                let mut notifications = self.notifier.enabled();
+                if ui
+                    .checkbox(
+                        &mut notifications,
+                        lang.t(
+                            "断线/重连/新版本时提醒（窗口在前台时不弹）",
+                            "On disconnect, reconnect and updates (only when backgrounded)",
+                        ),
+                    )
+                    .changed()
+                {
+                    self.notifier.set_enabled(notifications);
+                    self.persist_ui();
                 }
                 ui.end_row();
 

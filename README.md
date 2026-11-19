@@ -26,7 +26,7 @@ Windows 客户端 ── RFB/SSH (5900) ──────────► macOS 
 | **输入** | 完整修饰键状态机、Windows→macOS 修饰键映射（可配）、特殊键菜单、远端光标形状（32bpp） |
 | **视图** | 适应窗口 / 1:1 像素 / 50% / 100% / 200%，超出视口双向滚动；HiDPI 按 `pixels_per_point` 换算；全屏（F11） |
 | **会话** | 多标签（后台标签暂停请求、切回 `FullRefresh`）、重启还原标签与窗口几何、自动重连（指数退避）、连接/握手超时 |
-| **系统** | 单实例互斥（按用户，跨登录会话；再次启动会唤起已有窗口）、托盘常驻（关窗隐藏）、开机自启（`--minimized` 静默启动）、凭据存 Credential Manager、诊断日志与诊断包 |
+| **系统** | 单实例互斥（按用户，跨登录会话；再次启动会唤起已有窗口）、托盘常驻（关窗隐藏）、系统通知（断线/重连/新版本，窗口在前台时不弹）、开机自启（`--minimized` 静默启动）、凭据存 Credential Manager、诊断日志与诊断包 |
 | **安装** | Inno Setup 安装包 + WiX per-user MSI；Authenticode 签名脚本；manifest 更新（SHA-256 校验 + 回滚） |
 | **Agent** | 8 位配对码（300 秒一次性，带尝试次数与按 IP 限流）、mTLS 证书固定、剪贴板、Opus 48 kHz 立体声、**自动降分辨率**（按客户端屏幕选目标，帧率 <30 时逐级下退） |
 
@@ -87,7 +87,7 @@ ed25519 密钥 + `authorized_keys` 指引。host key 首次连接需显式信任
 
 | 项目 | 现状 |
 |---|---|
-| 测试 | Windows 侧 **158 个**（含 mock RFB 端到端、QUIC 回环、像素级比对、输入延迟基准、协议属性测试）；macOS 侧由 CI 覆盖 |
+| 测试 | Windows 侧 **162 个**（含 mock RFB 端到端、QUIC 回环、像素级比对、输入延迟基准、协议属性测试）；macOS 侧由 CI 覆盖 |
 | 质量门 | `cargo fmt --check`、`clippy -D warnings`、**debug 与 release 双模式测试**、actionlint + shellcheck |
 | 一键验收 | `powershell -File scripts/acceptance.ps1`（8 步，含真机探针） |
 | 性能预算 | `scripts/bench-soak.ps1`（CPU/内存/句柄 + 稳态回归 + 阈值判定）、`--bench-frames`（本地呈现）、`tests/input_latency.rs`（输入→像素 P95） |
@@ -166,6 +166,7 @@ packaging/windows/          # Inno Setup、WiX MSI、签名与更新 manifest �
 | 画面撕裂、"果冻"、像在扫描 | 确认用 release 构建；再看状态栏 fps 与「静止降频」标记 |
 | 极速（16bpp）偏色/发黑 | 0.1.0 已修（RGB565 通道缩放溢出）；老版本请升级 |
 | SSH 认证失败 | 检查 OpenSSH 版本（密码需 8.4+/Windows 8.6+），或改用密钥 |
+| 收不到系统通知 | 先跑 `.\target\release\rustvnc-client.exe --test-notification` 自测；仍不弹就查“设置 → 系统 → 通知”里 RustVNC 是否被关掉、勿扰模式是否开启 |
 | 日志位置 | `%APPDATA%\RustVNC\client\logs`；"诊断" 页可一键导出诊断包 |
 
 ## 许可

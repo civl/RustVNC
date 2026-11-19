@@ -3,6 +3,7 @@ pub mod credentials;
 pub mod diag;
 pub mod fonts;
 pub mod input;
+pub mod notify;
 pub mod profiles;
 pub mod session;
 pub mod single_instance;

@@ -39,6 +39,11 @@ flate2 = "1"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
+# Toast notifications from an unpackaged desktop app (WinRT).
+tauri-winrt-notification = "0.8.1"
+# Registering the AppUserModelID those toasts are attributed to. Already in the
+# dependency graph through `auto-launch`, so this adds no build.
+windows-registry = "0.6"
 # Single-instance mutex + the activation event another launch signals.
 # `Win32_Security` is required because CreateMutexW/CreateEventW take a
 # SECURITY_ATTRIBUTES pointer even when it is null.

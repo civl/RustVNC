@@ -45,8 +45,25 @@ fn real_main() -> anyhow::Result<()> {
             return run_serve(options);
         }
         Some("--request-screen-permission") => {
+            // The system prompt disappears with the process, so stay alive and
+            // watch for the grant while the user is in System Settings.
             let granted = rustvnc_agent::display::request_screen_recording();
+            let path = paths::agent_dir().join("displays.txt");
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             println!("screen recording prompt shown; granted={granted}");
+            for second in 0..120 {
+                let text = rustvnc_agent::display::diagnose();
+                let _ = std::fs::write(&path, &text);
+                if text.contains("screen recording permission: true") {
+                    println!("granted after {second}s");
+                    print!("{text}");
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            println!("still not granted after 120s");
             print!("{}", rustvnc_agent::display::diagnose());
             return Ok(());
         }

@@ -39,11 +39,11 @@ Windows 客户端 ── RFB/SSH (5900) ──────────► macOS 
 | **M0** | 协议兼容性（握手 / ARD 认证 / 编码 / Apple 伪编码） | ✅ |
 | **A0–A2b** | macOS Agent：骨架、QUIC 控制面、菜单栏与剪贴板、音频 | ✅ |
 | **M1** | Windows 客户端会话核心：出画、输入、重连、诊断 | ✅ |
-| **M2a** | 渲染 / DPI / 视图比例 | 🟡 多显示器裁切与选择未做 |
+| **M2a** | 渲染 / DPI / 视图比例 / 区域裁切 | ✅ 比例、HiDPI、区域取景、分辨率自适应；按显示器逐屏流未做 |
 | **M2b** | 自适应请求控制器（延迟 EMA + 滞回 + 静止降频） | ✅ |
-| **M2c** | 多标签 / 托盘 / 开机自启 | 🟡 系统通知未做 |
+| **M2c** | 多标签 / 托盘 / 通知 / 开机自启 | ✅ 含单实例互斥、工作区跨重启、系统通知 |
 | **M2d** | MSI / Authenticode / 自动更新 / 回滚 | 🟡 真实证书与更新服务器待补 |
-| **M2e** | 性能、内存、8 小时 soak | ⬜ 未开始 |
+| **M2e** | 性能、内存、8 小时 soak | 🟡 工具已就绪 + 1440p 实测 59.9 fps；8 小时 soak 与 4K60 基准待跑 |
 
 ## 快速开始
 
@@ -87,7 +87,7 @@ ed25519 密钥 + `authorized_keys` 指引。host key 首次连接需显式信任
 
 | 项目 | 现状 |
 |---|---|
-| 测试 | Windows 侧 **173 个**（含 mock RFB 端到端、QUIC 回环、像素级比对、输入延迟基准、协议属性测试）；macOS 侧由 CI 覆盖 |
+| 测试 | Windows 侧 **175 个**（含 mock RFB 端到端、QUIC 回环、像素级比对、输入延迟基准、协议属性测试）；macOS 侧由 CI 覆盖 |
 | 质量门 | `cargo fmt --check`、`clippy -D warnings`、**debug 与 release 双模式测试**、actionlint |
 | 本地非 Windows 检查 | `pwsh -File scripts/check-nonwindows.ps1`：Windows 开发机只能编 Windows cfg，这个脚本把 `#[cfg(windows)]` 反转为假、`not(windows)` 反转为真，对自包含模块跑 `clippy -D warnings`，抓 macOS CI 才会暴露的 dead code（本项目踩过两次） |
 | 一键验收 | `powershell -File scripts/acceptance.ps1`（8 步，含真机探针） |
@@ -153,10 +153,10 @@ packaging/windows/          # Inno Setup、WiX MSI、签名与更新 manifest �
 - **远端光标形状仅 32bpp**：16bpp（极速）不请求光标编码，仍显示本地指针。
 - **D3D11 不可用**：wgpu 只有 DX12/Vulkan/GL 后端。仅 D3D11 级显卡的机器实际落到 GL 或 glow；
   要真 D3D11 需自带 ANGLE 或另写渲染器。
-- **通知**：托盘/多标签/开机自启已做，系统通知未做。
+- **通知**：断线/重连/新版本会发系统通知，窗口在前台时不打扰；通知权限需在系统设置里授予。
 - **签名与更新**：脚本与校验链路完备，但真实证书的 Authenticode、公证、以及公网更新服务器
   尚未配置；`RUSTVNC_UPDATE_URL` 可指向自建 manifest。
-- **未实测**：8 小时 soak、4K/60 本地呈现基准、输入 P95 延迟（需要可连的 Mac + 真机）。
+- **未实测**：8 小时 soak 与 4K60 本地呈现基准（1440p 已实测 59.9 fps，见 [M2-PLAN](M2-PLAN.md)）；真机输入 P95 仍需人工操作录制。
 - **Windows 上 `cargo check --workspace` 会失败**：根包 `rustvnc-agent` 是 macOS-only，
   请按平台指定 `-p`。
 

@@ -370,6 +370,9 @@ struct App {
     share_running: bool,
     share_error: Option<String>,
     share_checked: Instant,
+    /// `--share` fires once: calling it every frame re-spawned the helper and
+    /// truncated its log until nothing was listening.
+    share_started: bool,
     /// Show the two-card landing screen instead of the connection form.
     show_home: bool,
     /// `--connect`: profile to select and connect to on the first frame.
@@ -713,6 +716,7 @@ impl App {
             share_running: false,
             share_error: None,
             share_checked: Instant::now(),
+            share_started: false,
             show_home: true,
             pending_connect: startup.connect.clone(),
             bench: startup.bench_seconds.map(|seconds| {
@@ -2097,9 +2101,10 @@ impl App {
 
     /// `--share`: begin hosting immediately (also used by the automated UI check).
     fn start_share_if_requested(&mut self) {
-        if !self.show_share {
+        if !self.show_share || self.share_started {
             return;
         }
+        self.share_started = true;
         self.toggle_share(true);
     }
 

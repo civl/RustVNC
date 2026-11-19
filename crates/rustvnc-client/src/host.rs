@@ -71,7 +71,9 @@ pub fn last_announcement() -> (Option<String>, Option<String>) {
 pub fn start(allow_resolution: bool) -> Result<PathBuf, String> {
     let helper = helper_path()
         .ok_or_else(|| "这个 App 里没有找到 rustvnc-agent（打包时未包含被控端组件）".to_string())?;
+    tracing::info!(helper = %helper.display(), "host: starting bundled agent");
     if running() {
+        tracing::info!("host: an agent is already serving, not spawning another");
         return Ok(log_path());
     }
     let log = log_path();

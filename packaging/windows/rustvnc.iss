@@ -2,7 +2,7 @@
 ; Build with: powershell -ExecutionPolicy Bypass -File build.ps1
 #define MyAppName "RustVNC"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0"
+  #define MyAppVersion "0.2.0"
 #endif
 #define MyAppPublisher "RustVNC"
 #define MyAppExeName "rustvnc-client.exe"
@@ -23,8 +23,8 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 
 [Languages]

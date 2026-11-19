@@ -436,6 +436,8 @@ struct App {
     pending_resolution: Option<(u16, u16)>,
     /// Single-screen request waiting for the capability list.
     pending_layout: Option<bool>,
+    /// How many times `--share` has tried to start the host service.
+    share_start_attempts: u8,
     agent_pair_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// Floating key-mapping editor.
     show_keymap: bool,
@@ -780,6 +782,7 @@ impl App {
             agent_status: String::new(),
             pending_resolution: None,
             pending_layout: None,
+            share_start_attempts: 0,
             agent_pair_rx: None,
             show_keymap: false,
             show_region: false,
@@ -2192,11 +2195,27 @@ impl App {
 
     /// `--share`: begin hosting immediately (also used by the automated UI check).
     fn start_share_if_requested(&mut self) {
-        if !self.show_share || self.share_started {
+        const MAX_ATTEMPTS: u8 = 3;
+        if !self.show_share || self.share_start_attempts >= MAX_ATTEMPTS {
             return;
         }
-        self.share_started = true;
+        // Retry on a timer instead of a one-shot flag: if the first spawn does
+        // not produce a running service, `--share` used to do nothing at all and
+        // leave no trace.
+        if self.share_start_attempts > 0 && self.share_checked.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        if rustvnc_client::host::running() {
+            self.share_start_attempts = MAX_ATTEMPTS;
+            return;
+        }
+        self.share_start_attempts += 1;
         self.toggle_share(true);
+        tracing::info!(
+            attempt = self.share_start_attempts,
+            running = rustvnc_client::host::running(),
+            "share: start attempt"
+        );
     }
 
     fn refresh_share_state(&mut self) {
@@ -2212,6 +2231,7 @@ impl App {
     }
 
     fn toggle_share(&mut self, start: bool) {
+        tracing::info!(start, "share: toggle requested");
         if start {
             match rustvnc_client::host::start(self.share_allow_resolution) {
                 Ok(log) => {

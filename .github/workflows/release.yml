@@ -87,6 +87,14 @@ jobs:
             throw "invalid release version: $version"
           }
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          $agentVersion = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' |
+            Select-Object -First 1).Matches.Groups[1].Value
+          $clientVersion = (Select-String -Path crates/rustvnc-client/Cargo.toml -Pattern '^version = "([^"]+)"' |
+            Select-Object -First 1).Matches.Groups[1].Value
+          if ($agentVersion -ne $version -or $clientVersion -ne $version) {
+            throw "tag $version does not match Cargo versions (agent=$agentVersion client=$clientVersion); bump both before tagging"
+          }
       - name: Materialise signing certificate
         if: env.WINDOWS_SIGN_CERT_BASE64 != ''
         shell: pwsh

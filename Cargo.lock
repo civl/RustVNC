@@ -3989,7 +3989,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "rfb-probe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4172,7 +4172,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rustvnc-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4211,7 +4211,7 @@ dependencies = [
 
 [[package]]
 name = "rustvnc-agent-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4236,7 +4236,7 @@ dependencies = [
 
 [[package]]
 name = "rustvnc-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ab_glyph",
  "anyhow",

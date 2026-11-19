@@ -141,7 +141,7 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 - [x] 强制退出客户端后仍恢复（Agent 监听 `connection.closed()`）
 - [x] Agent 崩溃后重新启动，残留模式被恢复（`restore_saved`）
 - [ ] 菜单关闭时请求被明确拒绝（代码路径已实现，未单独实测）
-- [ ] 单屏镜像（`SetDisplayLayout`）：**需要“屏幕录制”权限**，未授权前返回明确错误
+- [x] 单屏镜像（`SetDisplayLayout`）：2026-11-19 实测通过（见下）
 
 > **2026-11-19 真机实测（Mac mini M4 / macOS 27.2.1 / arm64）**
 >
@@ -163,6 +163,18 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 > 该现象已用独立 Swift 程序与项目二进制在 SSH / `open` / LaunchAgent 四种上下文下复现，
 > `--diagnose-displays` 会直接打印 `screen recording permission: false`。
 
+
+> **2026-11-19 单屏镜像实测（双屏：5120×2880 + 3840×2160，合成 8960×2880）**
+>
+> ```text
+> LAYOUT single=true applied=true: 已镜像为单屏
+> 会话中：两块屏都 Mirror: On，framebuffer 8960x2880 → 5120x2880（54.3 fps）
+> 会话结束：两块屏 Mirror: Off，虚拟屏回 3840x2160，framebuffer 回 8960x2880
+> ```
+>
+> 前提：**屏幕录制权限必须授予"当前"这个 App 构建**。ad-hoc 签名每次重建都会变，
+> 授权会随之失效——上一轮 `applied=false` 的报错就是这个原因，不是 API 限制。
+> 用 `--diagnose-displays` 可确认 `permission: true` 与 `active displays: 2`。
 ## 5. 分辨率变化
 
 在 Mac 上改分辨率或插拔外接屏。

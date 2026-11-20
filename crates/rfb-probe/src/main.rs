@@ -375,6 +375,9 @@ fn handle_event(
                 info!("cursor {}x{}", rect.width, rect.height);
             }
         }
+        // Emitted once per complete framebuffer update; the probe counts rects
+        // rather than updates, so this needs no handling beyond staying quiet.
+        VncEvent::UpdateComplete => {}
         VncEvent::Bell => info!("bell"),
         VncEvent::Text(text) => println!("clipboard: {} bytes", text.len()),
         VncEvent::Error(err) => warn!("server error event: {err}"),

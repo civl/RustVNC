@@ -123,6 +123,19 @@ jobs:
           name: fuzz-artifacts
           path: fuzz/artifacts
 
+  secrets:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # A committed credential is the one finding that cannot be patched out
+      # later, so it is checked on every push rather than at release time.
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   windows-installer:
     runs-on: windows-2025
     # `secrets.*` is not allowed inside `if:` expressions (GitHub rejects the

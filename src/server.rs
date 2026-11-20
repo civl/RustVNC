@@ -858,3 +858,43 @@ mod tests {
         assert!(!limiter.allow(ip));
     }
 }
+
+#[cfg(test)]
+mod revoke_tests {
+    use super::revoke_client;
+
+    #[test]
+    fn revocation_removes_only_the_named_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clients.txt");
+        std::fs::write(
+            &path,
+            "aaaa1111 laptop\nbbbb2222 desktop\n",
+        )
+        .unwrap();
+
+        assert!(revoke_client(dir.path(), "aaaa1111").unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("aaaa1111"), "revoked entry survived: {text}");
+        assert!(text.contains("bbbb2222"), "other client was dropped: {text}");
+    }
+
+    #[test]
+    fn revoking_an_unknown_fingerprint_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clients.txt");
+        std::fs::write(&path, "aaaa1111 laptop\n").unwrap();
+
+        assert!(!revoke_client(dir.path(), "cccc3333").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "aaaa1111 laptop\n"
+        );
+    }
+
+    #[test]
+    fn revoking_without_a_clients_file_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!revoke_client(dir.path(), "aaaa1111").unwrap());
+    }
+}

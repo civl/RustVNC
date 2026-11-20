@@ -169,6 +169,12 @@ Agent 二进制（随 `.app` 一起打包，也可单独运行）：
 
 环境变量：`RUSTVNC_RENDERER`（渲染后端，优先级高于设置）、`RUSTVNC_ALLOW_MULTIPLE`（允许多实例）、`RUSTVNC_UPDATE_URL`（更新 manifest）、`MACOS_USERNAME` / `MACOS_PASSWORD`（自动化登录）。
 
+## 安全默认值
+
+- **直连（非 SSH）首次连接**会弹一次确认：画面与按键在该路径上是明文，需要你显式同意；可一键改用 SSH 隧道，决策写入审计日志。
+- **无人值守**（`--connect` 或 `RUSTVNC_AUTOMATION=1`）不再弹窗，按"已同意"记录审计后继续。
+- 审计日志：`%APPDATA%\RustVNC\client\audit.jsonl`（追加写、4 MiB 轮转、密钥字段恒定脱敏）。
+
 ## 设置与命令行开关
 
 界面右上角 ⚙ 里集中了这些开关（改动立即持久化到 `ui.json`）：

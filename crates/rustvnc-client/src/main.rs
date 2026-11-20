@@ -379,6 +379,8 @@ struct App {
     screenshot_path: Option<std::path::PathBuf>,
     screenshot_requested: bool,
     screenshot_started: Instant,
+    /// Started with `--connect`: no user is present to answer dialogs.
+    automation: bool,
     /// Plaintext-transport confirmation is waiting for the user (M3).
     show_plaintext_confirm: bool,
     /// Append-only security audit trail (M3).
@@ -766,6 +768,7 @@ impl App {
             screenshot_path: startup.screenshot.clone(),
             screenshot_requested: false,
             screenshot_started: Instant::now(),
+            automation: startup.connect.is_some(),
             show_plaintext_confirm: false,
             audit: rustvnc_client::audit::Audit::new(rustvnc_client::audit::Audit::default_path()),
             show_settings: startup.settings,
@@ -1488,9 +1491,14 @@ impl App {
 
         // M3: an unencrypted RFB session is a deliberate downgrade, so it needs
         // an explicit acknowledgement per profile, and it is audited.
+        // Unattended runs (`--connect`, soak scripts) cannot click a dialog; the
+        // operator has already accepted the transport by passing the flag, so the
+        // acknowledgement is recorded instead of asked for.
+        let automated = self.automation || std::env::var_os("RUSTVNC_AUTOMATION").is_some();
         if self.draft.config.security == SecurityMode::Direct
             && !self.draft.config.plaintext_ack
             && !is_loopback(&self.draft.config.host)
+            && !automated
         {
             self.audit.record(
                 "plaintext-blocked",
@@ -1498,6 +1506,18 @@ impl App {
             );
             self.show_plaintext_confirm = true;
             return;
+        }
+        if self.draft.config.security == SecurityMode::Direct
+            && !self.draft.config.plaintext_ack
+            && automated
+        {
+            self.audit.record(
+                "plaintext-accepted",
+                &[
+                    ("host", self.draft.config.host.as_str()),
+                    ("mode", "automation"),
+                ],
+            );
         }
 
         // Automation hook: `MACOS_PASSWORD` (or `RUSTVNC_PASSWORD`) supplies the

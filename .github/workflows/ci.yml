@@ -74,10 +74,15 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       # Advisories, not just licences: cargo-deny above already covers policy.
+      # Run the binary directly instead of rustsec/audit-check: that action wants
+      # `checks: write` to annotate, which a read-only workflow does not grant.
       - name: cargo audit (RustSec)
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        # `.cargo/audit.toml` carries the one accepted advisory with its
+        # reachability argument; unmaintained/unsound warnings are triaged in
+        # M3-REPORT.md §5 and do not fail the build.
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
       - name: SBOM (CycloneDX)
         run: |
           python3 scripts/sbom.py > sbom.cdx.json
@@ -98,6 +103,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+      - name: Install system audio libraries
+        # `opus` -> `alsa-sys` on Linux: the fuzz crate links the agent client.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config cmake
       - name: Install nightly and cargo-fuzz
         run: |
           rustup toolchain install nightly --profile minimal

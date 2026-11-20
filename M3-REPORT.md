@@ -80,7 +80,19 @@ cargo +nightly fuzz run apple_metadata -- -max_total_time=86400 -rss_limit_mb=40
 按字段名脱敏：`password/passwd/secret/token/private` 的值恒写 `<redacted>`；
 正文里形似密钥的长串同样替换。
 
-## 5. 尚未完成
+## 5. 依赖审计结果（`cargo audit`，2026-11-20）
+
+`cargo audit` 报 1 个漏洞、6 个 unmaintained、10 个 unsound，全部为传递依赖：
+
+| 项 | 结论 |
+|---|---|
+| **RUSTSEC-2026-0293** `ringbuf` 0.4.8（双重释放/UAF，`Consumer::skip`/`clear`） | **评估为不可达**：`flexaudio-core 0.8.1` 只调用 `pop_slice`/`try_pop`/`push_overwrite`，源码中无 `skip`/`clear` 调用点；且需元素 `Drop` panic，我们的元素是纯 `f32/u16` 结构。记录在 `.cargo/audit.toml`，待 flexaudio 升级到 ringbuf 0.5 后删除该豁免 |
+| `atomic-polyfill`、`instant`、`paste`、`proc-macro-error`、`rustls-pemfile`、`ttf-parser` | unmaintained，均非直接依赖、无已知安全问题；随上游更新自然消失 |
+| `glib` ×1、`heapless` ×9 | unsound 警告；`glib` 走 GTK 编辑器（非发布路径），`heapless` 仅经网络栈的固定容量容器使用，未触及告警中的 `u16::MAX` 边界 |
+
+`cargo audit` 现在 **exit 0**（豁免有据可查），CI `security` 作业不再因它变红。
+
+## 6. 尚未完成
 
 1. **外部渗透测试**（需外部团队，计划已备）。
 2. **24 小时 fuzz 连续跑**（目标与 CI 已就位，长跑未执行）。

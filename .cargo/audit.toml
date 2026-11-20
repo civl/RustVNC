@@ -1,0 +1,34 @@
+# cargo-audit policy.
+#
+# `cargo audit` fails on any advisory that is not listed here, so this file is the
+# place where a finding is either fixed or explained. Warnings (unmaintained /
+# unsound) are reported but do not fail the build; their triage lives in
+# M3-REPORT.md §5.
+
+[advisories]
+ignore = [
+  "RUSTSEC-2026-0293",
+]
+
+# RUSTSEC-2026-0293 — ringbuf < 0.5.2: double free / use-after-free in
+# `Consumer::skip` and `Consumer::clear` when an element's `Drop` panics.
+#
+# Assessed unreachable, 2026-11-20:
+#   * ringbuf 0.4.8 enters through flexaudio-core 0.8.1 (audio capture).
+#   * flexaudio-core never calls `skip` or `clear`: it uses `pop_slice`,
+#     `try_pop` and `push_overwrite` only (verified by searching the 0.8.1
+#     sources). Both vulnerable functions therefore have no call site.
+#   * the bug additionally requires a panicking `Drop`; our elements are plain
+#     structs of `f32`/`u16` with no custom `Drop`.
+#
+# Revisit when flexaudio supports ringbuf 0.5 (then drop this entry), or if we
+# start calling `skip`/`clear` ourselves.
+
+[yanked]
+# A yanked crate in the lockfile is a supply-chain signal worth seeing, but it
+# does not fail the build: the lockfile pins an exact, already-vetted version.
+enabled = true
+
+# Findings are shown but do not fail: they are triaged in M3-REPORT.md §5.
+[output]
+quiet = false

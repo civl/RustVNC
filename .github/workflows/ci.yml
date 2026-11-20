@@ -197,3 +197,16 @@ jobs:
         # The Windows half of the release-mode gate; the macOS job covers the
         # whole workspace.
         run: cargo test --release -p rustvnc-client -p rustvnc-agent-client -p vnc-rs -p rfb-probe
+
+  hardening:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the shipped binary
+        run: cargo build --release -p rustvnc-client
+      # The flags live in `.cargo/config.toml`; this asserts the produced PE
+      # actually carries them, so a dropped rustflag fails the build.
+      - name: Verify PE hardening bits
+        run: python scripts/check-pe-hardening.py target/release/rustvnc-client.exe
+

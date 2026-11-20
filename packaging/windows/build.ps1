@@ -19,7 +19,10 @@ try {
     if (-not $isccPath) {
         foreach ($candidate in @(
             "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            # `winget install JRSoftware.InnoSetup` installs per-user, not into
+            # Program Files, which is why this path is listed explicitly.
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
         )) {
             if (Test-Path $candidate) { $isccPath = $candidate; break }
         }

@@ -21,3 +21,4 @@ INFO: seed corpus: files: 5 min: 1b max: 9b total: 25b rss: 41Mb
 #2097152	pulse  cov: 40 ft: 40 corp: 6/26b lim: 4096 exec/s: 72315 rss: 357Mb
 #4194304	pulse  cov: 40 ft: 40 corp: 6/26b lim: 4096 exec/s: 69905 rss: 620Mb
 #8388608	pulse  cov: 40 ft: 40 corp: 6/26b lim: 4096 exec/s: 65027 rss: 623Mb
+#16777216	pulse  cov: 40 ft: 40 corp: 6/26b lim: 4096 exec/s: 67378 rss: 625Mb

@@ -419,3 +419,8 @@ INFO: A corpus is not provided, starting from an empty corpus
 #9885842	REDUCE cov: 320 ft: 386 corp: 211/1405b lim: 4096 exec/s: 70613 rss: 531Mb L: 17/32 MS: 1 EraseBytes-
 #11723769	REDUCE cov: 320 ft: 386 corp: 211/1404b lim: 4096 exec/s: 71924 rss: 531Mb L: 6/32 MS: 2 EraseBytes-CopyPart-
 #14145010	REDUCE cov: 320 ft: 386 corp: 211/1403b lim: 4096 exec/s: 72538 rss: 532Mb L: 21/32 MS: 1 EraseBytes-
+#16777216	pulse  cov: 320 ft: 386 corp: 211/1403b lim: 4096 exec/s: 72944 rss: 532Mb
+#18349746	REDUCE cov: 320 ft: 386 corp: 211/1402b lim: 4096 exec/s: 73106 rss: 532Mb L: 15/32 MS: 1 EraseBytes-
+#18643292	REDUCE cov: 320 ft: 386 corp: 211/1400b lim: 4096 exec/s: 71704 rss: 532Mb L: 19/32 MS: 1 EraseBytes-
+#19009863	REDUCE cov: 320 ft: 386 corp: 211/1399b lim: 4096 exec/s: 70406 rss: 532Mb L: 25/32 MS: 1 EraseBytes-
+#20663099	REDUCE cov: 320 ft: 386 corp: 211/1398b lim: 4096 exec/s: 69807 rss: 533Mb L: 21/32 MS: 1 EraseBytes-

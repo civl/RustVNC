@@ -8,3 +8,5 @@ packaging/windows/stage/
 fuzz/target/
 fuzz/artifacts/
 fuzz/corpus/
+fuzz/fuzz-*.log
+fuzz/fuzz-*.log.err

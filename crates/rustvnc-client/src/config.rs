@@ -397,6 +397,10 @@ pub struct ClientConfig {
     /// one, so the framebuffer (and its cost) collapses to one screen.
     #[serde(default)]
     pub single_display: bool,
+    /// The user accepted the plaintext (non-SSH) transport for this profile.
+    /// Recorded so the warning is shown once and every later use is audited.
+    #[serde(default)]
+    pub plaintext_ack: bool,
     /// Remote-screen zoom policy (M2a). Applies immediately, no reconnect.
     #[serde(default)]
     pub view_mode: ViewMode,
@@ -443,6 +447,7 @@ impl Default for ClientConfig {
             encoding: EncodingPreference::Zrle,
             resolution: ResolutionPreset::Auto,
             single_display: false,
+            plaintext_ack: false,
             view_mode: ViewMode::Fit,
             adaptive: true,
             key_mapping: KeyMapping::standard(),

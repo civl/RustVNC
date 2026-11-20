@@ -55,6 +55,18 @@ struct StartupOptions {
     form: bool,
 }
 
+/// Loopback targets are not a network exposure, so the plaintext warning would
+/// only train the user to click through it.
+fn is_loopback(host: &str) -> bool {
+    let host = host.trim();
+    host == "localhost"
+        || host == "::1"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(false)
+}
+
 fn startup_options() -> StartupOptions {
     let mut options = StartupOptions::default();
     let mut args = std::env::args().skip(1);
@@ -179,6 +191,8 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    // M3: DLL search order, child-process job object, redacted panic records.
+    rustvnc_client::hardening::init();
     let _log_guard = rustvnc_client::diag::init_tracing();
 
     // Headless check of the host half: does this bundle find its agent, start it,
@@ -365,6 +379,10 @@ struct App {
     screenshot_path: Option<std::path::PathBuf>,
     screenshot_requested: bool,
     screenshot_started: Instant,
+    /// Plaintext-transport confirmation is waiting for the user (M3).
+    show_plaintext_confirm: bool,
+    /// Append-only security audit trail (M3).
+    audit: rustvnc_client::audit::Audit,
     /// Settings window and the preferences it edits.
     show_settings: bool,
     close_to_tray: bool,
@@ -748,6 +766,8 @@ impl App {
             screenshot_path: startup.screenshot.clone(),
             screenshot_requested: false,
             screenshot_started: Instant::now(),
+            show_plaintext_confirm: false,
+            audit: rustvnc_client::audit::Audit::new(rustvnc_client::audit::Audit::default_path()),
             show_settings: startup.settings,
             close_to_tray: ui_state.close_to_tray.unwrap_or(true),
             renderer_choice: ui_state.renderer.clone(),
@@ -1054,6 +1074,9 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         self.update_install_rx = Some(rx);
         self.update_status = format!("准备安装 {}…", info.version);
+        // Recorded on the UI thread: the worker closure must stay Send.
+        self.audit
+            .record("update-install", &[("from", update::current_version())]);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let result = (|| -> anyhow::Result<()> {
@@ -1342,6 +1365,12 @@ impl App {
     }
 
     fn trust_host_key(&mut self) {
+        if let Some(probe) = &self.host_key_probe {
+            self.audit.record(
+                "host-key-trusted",
+                &[("known_hosts", probe.known_hosts.as_str())],
+            );
+        }
         let Some(probe) = self.host_key_probe.clone() else {
             return;
         };
@@ -1457,6 +1486,20 @@ impl App {
             let _ = self.credentials.delete(&self.draft.id);
         }
 
+        // M3: an unencrypted RFB session is a deliberate downgrade, so it needs
+        // an explicit acknowledgement per profile, and it is audited.
+        if self.draft.config.security == SecurityMode::Direct
+            && !self.draft.config.plaintext_ack
+            && !is_loopback(&self.draft.config.host)
+        {
+            self.audit.record(
+                "plaintext-blocked",
+                &[("host", self.draft.config.host.as_str())],
+            );
+            self.show_plaintext_confirm = true;
+            return;
+        }
+
         // Automation hook: `MACOS_PASSWORD` (or `RUSTVNC_PASSWORD`) supplies the
         // macOS account password for headless runs (soak, benchmarks, CI) so the
         // secret need not sit in the credential store. It is used for this
@@ -1499,6 +1542,16 @@ impl App {
                 ),
             }
         }
+        self.audit.record(
+            "connect",
+            &[
+                ("host", self.draft.config.host.as_str()),
+                ("port", &self.draft.config.port.to_string()),
+                ("auth", &format!("{:?}", self.draft.config.auth)),
+                ("transport", &format!("{:?}", self.draft.config.security)),
+                ("bpp", &self.draft.config.bpp.to_string()),
+            ],
+        );
         match Session::start(self.draft.config.clone(), password) {
             Ok(session) => {
                 self.frame = Frame::default();
@@ -1919,6 +1972,7 @@ impl App {
                     );
                 }
                 SessionEvent::Closed => {
+                    self.audit.record("disconnect", &[("reason", "closed")]);
                     closed = true;
                 }
             }
@@ -2193,6 +2247,61 @@ impl App {
         std::process::exit(0);
     }
 
+    /// Plaintext transport confirmation: explain the downgrade, offer SSH, and
+    /// record the decision either way.
+    fn plaintext_confirm_window(&mut self, ctx: &egui::Context) {
+        let lang = self.lang;
+        let mut open = self.show_plaintext_confirm;
+        let mut connect_now = false;
+        egui::Window::new(lang.t("明文连接确认", "Unencrypted connection"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(440.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(lang.t(
+                        "这条连接直连 5900，画面与按键在网络上是明文（没有任何加密）。",
+                        "This connection talks to port 5900 directly: screen and keystrokes travel unencrypted.",
+                    ))
+                    .strong(),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(lang.t(
+                        "同一局域网/受信任的 Tailscale 网络通常可以接受；公共 Wi-Fi 不应使用。",
+                        "Acceptable on a trusted LAN or Tailscale network; not on public Wi-Fi.",
+                    ))
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button(lang.t("改用 SSH 隧道", "Use SSH tunnel")).clicked() {
+                        self.draft.config.security = SecurityMode::Ssh;
+                        self.audit.record("plaintext-declined", &[]);
+                        self.show_plaintext_confirm = false;
+                    }
+                    if ui
+                        .button(lang.t("仍然连接（记录到审计）", "Connect anyway (audited)"))
+                        .clicked()
+                    {
+                        self.draft.config.plaintext_ack = true;
+                        self.audit.record(
+                            "plaintext-accepted",
+                            &[("host", self.draft.config.host.as_str())],
+                        );
+                        self.show_plaintext_confirm = false;
+                        connect_now = true;
+                    }
+                });
+            });
+        self.show_plaintext_confirm = open;
+        if connect_now {
+            self.connect();
+        }
+    }
+
     /// `--share`: begin hosting immediately (also used by the automated UI check).
     fn start_share_if_requested(&mut self) {
         const MAX_ATTEMPTS: u8 = 3;
@@ -2231,6 +2340,8 @@ impl App {
     }
 
     fn toggle_share(&mut self, start: bool) {
+        self.audit
+            .record("share", &[("start", if start { "yes" } else { "no" })]);
         tracing::info!(start, "share: toggle requested");
         if start {
             match rustvnc_client::host::start(self.share_allow_resolution) {
@@ -2351,6 +2462,7 @@ impl App {
                         self.check_updates();
                     }
                     if ui.button(lang.t("回滚", "Rollback")).clicked() {
+                        self.audit.record("update-rollback", &[]);
                         match update::rollback_installer() {
                             Some(path) => match std::process::Command::new(&path).spawn() {
                                 Ok(_) => {
@@ -3809,6 +3921,9 @@ impl eframe::App for App {
         }
         if self.show_settings {
             self.settings_window(ctx);
+        }
+        if self.show_plaintext_confirm {
+            self.plaintext_confirm_window(ctx);
         }
         if self.show_share {
             self.share_window(ctx);

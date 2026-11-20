@@ -1,0 +1,30 @@
+[package]
+name = "rustvnc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# cargo-fuzz builds this crate on its own; keeping it out of the workspace means
+# its nightly-only dependencies never affect a normal `cargo build`.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+postcard = { version = "1.1", features = ["use-std"] }
+rustvnc-agent-client = { path = "../crates/agent-client" }
+vnc-rs = { path = "../vendor/vnc-rs" }
+
+[[bin]]
+name = "apple_metadata"
+path = "fuzz_targets/apple_metadata.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "control_msg"
+path = "fuzz_targets/control_msg.rs"
+test = false
+doc = false

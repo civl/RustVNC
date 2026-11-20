@@ -1,0 +1,16 @@
+# Windows build hardening (design §M3: CFG/CET, ASLR, NX).
+#
+# These are linker flags rather than code, and they apply to every crate in the
+# workspace, which is what we want for the shipped binary.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+  # Control-flow guard: the loader refuses indirect calls to non-CFG targets.
+  "-C", "link-arg=/GUARD:CF",
+  # Intel CET compatibility (shadow stack on supporting hardware).
+  "-C", "link-arg=/CETCOMPAT",
+  # Keep ASLR/NX explicit instead of relying on linker defaults.
+  "-C", "link-arg=/DYNAMICBASE",
+  "-C", "link-arg=/NXCOMPAT",
+  # High-entropy ASLR (64-bit images).
+  "-C", "link-arg=/HIGHENTROPYVA",
+]

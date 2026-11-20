@@ -55,6 +55,9 @@ windows-sys = { version = "0.59", features = [
     # ConvertSidToStringSidW, for the per-user part of the lock name.
     "Win32_Security_Authorization",
     "Win32_System_Threading",
+    # M3 hardening: job object for child processes, DLL search order.
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]

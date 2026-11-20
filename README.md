@@ -43,6 +43,7 @@ Windows 客户端 ── RFB/SSH (5900) ──────────► macOS 
 | **M2b** | 自适应请求控制器（延迟 EMA + 滞回 + 静止降频） | ✅ |
 | **M2c** | 多标签 / 托盘 / 通知 / 开机自启 | ✅ 含单实例互斥、工作区跨重启、系统通知 |
 | **M2d** | MSI / Authenticode / 自动更新 / 回滚 | 🟡 真实证书与更新服务器待补 |
+| **M3** | 安全加固（传输/加固/审计/fuzz/SBOM） | 🟡 见 [M3-REPORT.md](M3-REPORT.md)：传输、加固、审计、SBOM 完成；渗透测试与 24h fuzz 待跑 |
 | **M2e** | 性能、内存、8 小时 soak | 🟡 工具已就绪 + 1440p 实测 59.9 fps；8 小时 soak 与 4K60 基准待跑 |
 
 ## 快速开始
@@ -163,6 +164,8 @@ Agent 二进制（随 `.app` 一起打包，也可单独运行）：
 | `--diagnose-displays` | 打印权限与显示器列表，并写入 `displays.txt` |
 | `--request-screen-permission` | 弹出屏幕录制授权请求并等待结果 |
 | `--status` / `--register` / `--unregister` | 登录项状态与注册 |
+| `--revoke <指纹>` | 吊销一个已配对客户端（下次握手被拒） |
+| `--rotate-ca --yes` | 轮换 CA 与服务端证书（所有客户端需重新配对，旧材料自动备份） |
 
 环境变量：`RUSTVNC_RENDERER`（渲染后端，优先级高于设置）、`RUSTVNC_ALLOW_MULTIPLE`（允许多实例）、`RUSTVNC_UPDATE_URL`（更新 manifest）、`MACOS_USERNAME` / `MACOS_PASSWORD`（自动化登录）。
 

@@ -68,6 +68,51 @@ jobs:
         with:
           command: check
 
+  security:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      # Advisories, not just licences: cargo-deny above already covers policy.
+      - name: cargo audit (RustSec)
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: SBOM (CycloneDX)
+        run: |
+          python3 scripts/sbom.py > sbom.cdx.json
+          python3 - <<'EOF'
+          import json
+          bom = json.load(open("sbom.cdx.json"))
+          assert bom["specVersion"] == "1.5", bom["specVersion"]
+          assert bom["components"], "empty SBOM"
+          print(f"{len(bom['components'])} components")
+          EOF
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: sbom.cdx.json
+
+  fuzz:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+      - name: Fuzz the Apple metadata parser
+        run: cd fuzz && cargo +nightly fuzz run apple_metadata -- -max_total_time=45 -rss_limit_mb=2048
+      - name: Fuzz the agent control decoder
+        run: cd fuzz && cargo +nightly fuzz run control_msg -- -max_total_time=45 -rss_limit_mb=2048
+      - name: Keep any crash artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
   windows-installer:
     runs-on: windows-2025
     # `secrets.*` is not allowed inside `if:` expressions (GitHub rejects the

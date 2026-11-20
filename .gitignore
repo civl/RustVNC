@@ -5,3 +5,6 @@
 # Installer artefacts (built by CI or locally)
 packaging/windows/output/
 packaging/windows/stage/
+fuzz/target/
+fuzz/artifacts/
+fuzz/corpus/

@@ -3,7 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -757,6 +757,39 @@ impl RateLimiter {
 
         allowed
     }
+}
+
+/// Revoke a paired client (M3): drop its fingerprint from `clients.txt`.
+///
+/// The client can no longer complete a handshake; a connection that is already
+/// open stays up until it closes, which is documented behaviour rather than a
+/// half-finished revocation.
+pub fn revoke_client(state_dir: &Path, fingerprint: &str) -> Result<bool> {
+    let path = state_dir.join("clients.txt");
+    if !path.exists() {
+        return Ok(false);
+    }
+    let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let mut removed = false;
+    let mut kept = String::with_capacity(text.len());
+    for line in text.lines() {
+        let keep = line
+            .split_whitespace()
+            .next()
+            .map(|entry| entry != fingerprint)
+            .unwrap_or(false);
+        if keep {
+            kept.push_str(line);
+            kept.push('\n');
+        } else if !line.trim().is_empty() {
+            removed = true;
+        }
+    }
+    if removed {
+        fs::write(&path, kept).with_context(|| format!("write {}", path.display()))?;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(removed)
 }
 
 struct Allowlist {

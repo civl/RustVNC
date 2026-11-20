@@ -1,0 +1,42 @@
+name: fuzz-nightly
+
+# M3 asks for a 24-hour parser fuzz campaign. GitHub caps a single job at 6 hours,
+# so the long run is split into a nightly hour per target; a real 24-hour run is
+# `cargo +nightly fuzz run <target> -- -max_total_time=86400` on a dedicated box
+# (see M3-REPORT.md §3).
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [apple_metadata, control_msg]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=3300 -rss_limit_mb=4096
+      - name: Upload crash and corpus
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: |
+            fuzz/artifacts
+            fuzz/corpus
+          if-no-files-found: ignore

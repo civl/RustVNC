@@ -144,9 +144,16 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: SBOM (CycloneDX)
+        run: |
+          python3 scripts/sbom.py > artifacts/sbom.cdx.json
+          python3 -c "import json;d=json.load(open('artifacts/sbom.cdx.json'));print(len(d['components']),'components')"
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # The SBOM ships with the binaries: an inventory nobody can find is
+          # not an inventory.
           gh release create "${GITHUB_REF_NAME}" artifacts/* \
             --title "RustVNC ${GITHUB_REF_NAME}" --generate-notes

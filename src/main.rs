@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 use rustvnc_agent::paths;
 use rustvnc_agent::server::{self, ServeInfo, ServeOptions, ServerEvent};
+use rustvnc_agent::tls;
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
@@ -79,6 +80,57 @@ fn real_main() -> anyhow::Result<()> {
                 Ok(()) => println!("written: {}", path.display()),
                 Err(err) => println!("could not write {}: {err}", path.display()),
             }
+            return Ok(());
+        }
+        Some("--revoke") => {
+            let fingerprint = args
+                .get(1)
+                .context("--revoke requires a client fingerprint")?;
+            let removed = server::revoke_client(&paths::agent_dir(), fingerprint)?;
+            println!(
+                "{}",
+                if removed {
+                    "revoked: the client must pair again"
+                } else {
+                    "no such client in clients.txt"
+                }
+            );
+            return Ok(());
+        }
+        Some("--rotate-ca") => {
+            // Rotation forces every client to pair again, so it needs an
+            // explicit confirmation flag rather than a bare argument.
+            if !args.iter().any(|arg| arg == "--yes") {
+                eprintln!(
+                    "rotating the CA invalidates every paired client.\n\
+                     re-run with --yes if that is what you want."
+                );
+                return Ok(());
+            }
+            let dir = paths::agent_dir();
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|delta| delta.as_secs())
+                .unwrap_or(0);
+            let backup = dir.join(format!("pre-rotation-{stamp}"));
+            fs::create_dir_all(&backup)?;
+            for name in [
+                "ca-cert.pem",
+                "ca-key.pem",
+                "server-cert.pem",
+                "server-key.pem",
+                "clients.txt",
+            ] {
+                let source = dir.join(name);
+                if source.exists() {
+                    fs::copy(&source, backup.join(name))?;
+                    fs::remove_file(&source)?;
+                }
+            }
+            let material = tls::ensure_material(&dir, &[], true)?;
+            println!("rotated; backup in {}", backup.display());
+            println!("new server fingerprint: {}", material.server_fingerprint);
+            println!("every client must pair again with a fresh pairing code");
             return Ok(());
         }
         Some("--status") => {

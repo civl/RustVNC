@@ -58,6 +58,10 @@ struct Cli {
     /// when the cursor shape changes (not merely when it moves).
     #[arg(long)]
     wiggle: bool,
+    /// Move the remote pointer to an absolute `x,y` once (verifies coordinate
+    /// mapping without sending any button or key).
+    #[arg(long)]
+    pointer: Option<String>,
     /// Optional remote coordinate `x,y` for --wiggle. The script points this at
     /// the terminal's text area so the arrow ⇄ I-beam transition triggers 1104.
     #[arg(long)]
@@ -200,6 +204,11 @@ async fn run(cli: Cli) -> Result<()> {
         let (x, y) = value.split_once(',')?;
         Some((x.trim().parse::<u16>().ok()?, y.trim().parse::<u16>().ok()?))
     });
+    let pointer_target = cli.pointer.as_deref().and_then(|value| {
+        let (x, y) = value.split_once(',')?;
+        Some((x.trim().parse::<u16>().ok()?, y.trim().parse::<u16>().ok()?))
+    });
+    let mut pointer_sent = false;
     let start = Instant::now();
     let deadline = start + Duration::from_secs(cli.seconds);
     let mut last_refresh = Instant::now() - Duration::from_millis(50);
@@ -229,6 +238,20 @@ async fn run(cli: Cli) -> Result<()> {
             && !window.is_open()
         {
             break;
+        }
+
+        if let Some((x, y)) = pointer_target {
+            if !pointer_sent && start.elapsed() >= Duration::from_millis(500) {
+                client
+                    .input(X11Event::PointerEvent(ClientMouseEvent {
+                        position_x: x,
+                        position_y: y,
+                        bottons: 0,
+                    }))
+                    .await?;
+                pointer_sent = true;
+                println!("pointer_moved {x},{y}");
+            }
         }
 
         if cli.input_test && !input_sent && start.elapsed() >= Duration::from_millis(500) {
